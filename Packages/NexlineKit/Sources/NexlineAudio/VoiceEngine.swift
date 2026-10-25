@@ -8,18 +8,39 @@ import os
 /// With voice processing on, iOS cancels echo using what the player sends to the speaker as the
 /// reference, so the mic stays open while the bot talks and the user can cut in (barge-in).
 /// The RN app could not do this: its recorder and player were separate audio units.
+///
+/// The audio session is configured once (`configureSession`); `start` and every restart only
+/// rebuild the engine. Re-applying the session on each restart fed a stop/restart loop in build 2.
 public final class VoiceEngine {
     public struct MicBlock: Sendable {
         public let levelDB: Float
         public let durationMs: Double
     }
 
+    /// The audio session settings the engine runs under. Spike builds compare several.
+    public struct SessionSetup: @unchecked Sendable {
+        public let name: String
+        public let mode: AVAudioSession.Mode
+        public let options: AVAudioSession.CategoryOptions
+        public let preferredSampleRate: Double?
+
+        public init(name: String, mode: AVAudioSession.Mode, options: AVAudioSession.CategoryOptions,
+                    preferredSampleRate: Double? = nil) {
+            self.name = name
+            self.mode = mode
+            self.options = options
+            self.preferredSampleRate = preferredSampleRate
+        }
+    }
+
     public enum EngineError: LocalizedError {
         case noMicrophone
+        case sessionNotConfigured
 
         public var errorDescription: String? {
             switch self {
             case .noMicrophone: return "no microphone input (0 Hz)"
+            case .sessionNotConfigured: return "audio session not configured"
             }
         }
     }
@@ -32,14 +53,20 @@ public final class VoiceEngine {
     public var onMicBlock: (@Sendable (MicBlock) -> Void)?
     /// Engine messages worth showing in a log.
     public var onEvent: (@Sendable (String) -> Void)?
+    /// Rebuild the engine after a configuration change. Off while comparing setups, so a setup
+    /// that can't stay up shows as stopped instead of being papered over.
+    public var autoRestart = true
 
     public private(set) var voiceProcessing = true
+    public private(set) var setup: SessionSetup?
+    /// Every configuration-change notification since launch.
+    public private(set) var configChanges = 0
     private var engine = AVAudioEngine()
     private var player = AVAudioPlayerNode()
     private var started = false
     private var configObserver: NSObjectProtocol?
     private var recentRestarts: [Date] = []
-    /// Bumped by every stop (and so every start), so a pending restart retry can tell it is stale.
+    /// Bumped by every stop (and so every start), so a pending restart can tell it is stale.
     private var generation = 0
     private let log = Logger(subsystem: "com.nexlineai.voice", category: "engine")
 
@@ -47,15 +74,23 @@ public final class VoiceEngine {
 
     public var isRunning: Bool { started && engine.isRunning }
 
+    /// Stops the engine and applies `setup` to the shared session.
+    public func configureSession(_ setup: SessionSetup) throws {
+        stop()
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playAndRecord, mode: setup.mode, options: setup.options)
+        if let rate = setup.preferredSampleRate { try session.setPreferredSampleRate(rate) }
+        try session.setPreferredIOBufferDuration(0.02)
+        try session.setActive(true)
+        self.setup = setup
+        report("session: \(setup.name), hardware in \(Int(session.sampleRate)) Hz")
+    }
+
     /// Starts a fresh engine. Voice processing can only change while stopped, so a toggle is a restart.
     public func start(voiceProcessing: Bool) throws {
         stop()
+        guard setup != nil else { throw EngineError.sessionNotConfigured }
         self.voiceProcessing = voiceProcessing
-
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothA2DP])
-        try session.setPreferredIOBufferDuration(0.02)
-        try session.setActive(true)
 
         engine = AVAudioEngine()
         player = AVAudioPlayerNode()
@@ -75,11 +110,10 @@ public final class VoiceEngine {
             sink?(MicBlock(levelDB: db, durationMs: Double(frames) / rate * 1000))
         }
 
-        // A route change (headphones, car) stops the engine; bring it back with the same settings.
         configObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
         ) { [weak self] _ in
-            self?.restartAfterConfigurationChange()
+            self?.configurationChanged()
         }
 
         engine.prepare()
@@ -117,27 +151,30 @@ public final class VoiceEngine {
         player.stop()
     }
 
-    private func restartAfterConfigurationChange() {
-        // Enabling voice processing or re-activating the session can post this notification itself.
-        // If the engine still runs there is nothing to do, and the cap stops a restart loop.
-        guard !engine.isRunning else { return }
-        let now = Date()
-        recentRestarts = recentRestarts.filter { now.timeIntervalSince($0) < 60 } + [now]
-        guard recentRestarts.count <= 5 else {
-            report("audio keeps reconfiguring, stopped restarting (toggle echo cancellation to retry)")
-            return
-        }
-        do {
-            try start(voiceProcessing: voiceProcessing)
-            report("audio route changed, engine restarted")
-        } catch {
-            // Mid-reconfiguration the mic can read 0 Hz for a moment. The failed start already
-            // dropped the observer, so nothing else would bring the engine back: retry shortly.
-            report("engine restart failed: \(error.localizedDescription), retrying")
-            let gen = generation
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                guard let self, self.generation == gen else { return }
-                self.restartAfterConfigurationChange()
+    private func configurationChanged() {
+        configChanges += 1
+        report("configuration change #\(configChanges), engine \(engine.isRunning ? "still running" : "stopped")")
+        guard autoRestart else { return }
+        // A route change (headphones, car) stops the engine. Let the route settle, then rebuild.
+        scheduleRestart(after: 0.5)
+    }
+
+    private func scheduleRestart(after seconds: Double) {
+        let gen = generation
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
+            guard let self, self.generation == gen, !self.engine.isRunning else { return }
+            let now = Date()
+            self.recentRestarts = self.recentRestarts.filter { now.timeIntervalSince($0) < 60 } + [now]
+            guard self.recentRestarts.count <= 5 else {
+                self.report("audio keeps reconfiguring, stopped restarting (toggle echo cancellation to retry)")
+                return
+            }
+            do {
+                try self.start(voiceProcessing: self.voiceProcessing)
+                self.report("engine restarted")
+            } catch {
+                self.report("engine restart failed: \(error.localizedDescription), retrying in 1 s")
+                self.scheduleRestart(after: 1)
             }
         }
     }

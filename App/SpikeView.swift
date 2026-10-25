@@ -8,12 +8,30 @@ struct SpikeView: View {
         NavigationStack {
             List {
                 Section {
+                    Button("Check audio: stay quiet for 20 s") { Task { await model.checkAudio() } }
+                        .disabled(!model.ready || model.checking || model.running != nil)
+                    if model.checking {
+                        ProgressView("Trying \(model.checks.count + 1) of \(SpikeModel.setups.count)…")
+                    }
+                    ForEach(model.checks) { check in
+                        Text(check.line).font(.callout)
+                    }
+                    if let name = model.setupName {
+                        LabeledContent("Using", value: name)
+                    }
+                } header: {
+                    Text("Step 1")
+                } footer: {
+                    Text("Tries each audio setup with echo cancellation on and keeps the first that stays up.")
+                }
+
+                Section {
                     LabeledContent("Route", value: model.route)
                     Toggle("Echo cancellation", isOn: Binding(
                         get: { model.voiceProcessing },
                         set: { model.setVoiceProcessing($0) }
                     ))
-                    .disabled(model.running != nil)
+                    .disabled(model.setupName == nil || model.running != nil || model.checking)
                     MeterRow(meter: model.meter)
                 } header: {
                     Text("Microphone")
@@ -21,11 +39,11 @@ struct SpikeView: View {
                     Text("The bar is what the mic hears. Above the line counts as you talking.")
                 }
 
-                Section("Tests") {
+                Section("Step 2: tests") {
                     Button("Silent test: stay quiet while it talks") { model.start(.silent) }
-                        .disabled(!model.ready || model.running != nil)
+                        .disabled(!model.canTest)
                     Button("Talk-over test: interrupt it") { model.start(.talkOver) }
-                        .disabled(!model.ready || model.running != nil)
+                        .disabled(!model.canTest)
                     if model.running != nil {
                         Button("Stop", role: .destructive) { model.stop() }
                     }
@@ -39,11 +57,7 @@ struct SpikeView: View {
                         Text(run.line).font(.callout)
                     }
                     Button("Copy results") { model.copyResults() }
-                        .disabled(model.runs.isEmpty)
-                }
-
-                Section("On-device speech recognition") {
-                    Text(model.localeReport).font(.callout.monospaced())
+                        .disabled(model.runs.isEmpty && model.checks.isEmpty)
                 }
 
                 Section("Log") {

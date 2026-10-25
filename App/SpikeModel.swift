@@ -2,7 +2,6 @@ import AVFoundation
 import NexlineAudio
 import NexlineCore
 import os
-import Speech
 import SwiftUI
 import UIKit
 
@@ -16,9 +15,10 @@ final class Meter: ObservableObject {
 
 /// Audio spike: proves echo cancellation + barge-in on the phone with no network and no keys.
 ///
-/// Silent test: the phone talks, the user stays quiet. The mic level it hears is the echo that
-/// got through, and every detection is a false alarm. Talk-over test: the user cuts in and
-/// playback must stop. Run both with echo cancellation on and off to compare.
+/// Check audio: tries each session setup with echo cancellation on and keeps the first whose engine
+/// stays up with live mic data (in builds 1-2 it died about 1 s after every start). Silent test: the
+/// phone talks, the user stays quiet. The mic level it hears is the echo that got through, and every
+/// detection is a false alarm. Talk-over test: the user cuts in and playback must stop.
 @MainActor
 final class SpikeModel: ObservableObject {
     enum TestKind: String {
@@ -26,10 +26,36 @@ final class SpikeModel: ObservableObject {
         case talkOver = "talk-over"
     }
 
+    enum ClipError: Error {
+        case missing
+        case wrongFormat(String)
+        case noBuffer
+    }
+
+    struct CheckResult: Identifiable {
+        let id = UUID()
+        let setup: String
+        let error: String?
+        let running: Bool
+        let configChanges: Int
+        let blocks: Int
+        let meanDB: Float
+
+        /// Running alone is not enough: a dead tap would read as a perfect -100 again.
+        var passed: Bool { error == nil && running && blocks > 0 && meanDB > Level.silenceDB }
+
+        var line: String {
+            if let error { return "\(setup): FAIL, \(error)" }
+            return String(format: "%@: %@, engine %@, %d config changes, %d mic blocks in the last 2 s, mean %.0f dBFS",
+                          setup, passed ? "OK" : "FAIL", running ? "running" : "stopped", configChanges, blocks, meanDB)
+        }
+    }
+
     struct RunResult: Identifiable {
         let id = UUID()
         let kind: TestKind
         let echoCancellation: Bool
+        let setup: String
         let route: String
         /// Every mic block of the run. For the silent test this is the echo that got through.
         let levels: LevelStats
@@ -39,7 +65,7 @@ final class SpikeModel: ObservableObject {
         let firstDetectionSec: Double?
 
         var line: String {
-            let mode = "\(kind.rawValue), echo cancel \(echoCancellation ? "ON" : "OFF")"
+            let mode = "\(kind.rawValue), echo cancel \(echoCancellation ? "ON" : "OFF"), setup \(setup)"
             // No blocks at all means a dead engine, which would otherwise read as a perfect -100 / 0.
             guard levels.count > 0 else {
                 return String(format: "%@: NO MIC DATA after %.1f s, audio engine not running [%@]", mode, seconds, route)
@@ -63,17 +89,28 @@ final class SpikeModel: ObservableObject {
         let text: String
     }
 
+    /// A is what builds 1-2 used. Each later setup changes one thing, so a pass says what mattered.
+    static let setups: [VoiceEngine.SessionSetup] = [
+        .init(name: "A default mode + A2DP", mode: .default, options: [.defaultToSpeaker, .allowBluetoothA2DP]),
+        .init(name: "B default mode, speaker only", mode: .default, options: [.defaultToSpeaker]),
+        .init(name: "C voiceChat mode, speaker only", mode: .voiceChat, options: [.defaultToSpeaker]),
+        // Last, because a preferred rate stays on the session for the setups after it.
+        .init(name: "D voiceChat mode, speaker only, 48 kHz", mode: .voiceChat, options: [.defaultToSpeaker],
+              preferredSampleRate: 48_000),
+    ]
+
     let meter = Meter()
     @Published private(set) var voiceProcessing = true
     @Published private(set) var running: TestKind?
     @Published private(set) var ready = false
+    @Published private(set) var checking = false
+    @Published private(set) var checks: [CheckResult] = []
+    @Published private(set) var setupName: String?
     @Published private(set) var route = "–"
     @Published private(set) var runs: [RunResult] = []
     @Published private(set) var log: [LogLine] = []
-    @Published private(set) var localeReport = "checking…"
 
     private let engine = VoiceEngine()
-    private let speech = SpeechClip()
     private var detector = BargeInDetector()
     private var clip: [AVAudioPCMBuffer] = []
     private var booted = false
@@ -82,18 +119,14 @@ final class SpikeModel: ObservableObject {
     private var levels = LevelStats()
     private var detections = 0
     private var firstDetection: Double?
+    private var measuring = false
+    private var checkBlocks = 0
+    private var checkLevels = LevelStats()
     private var observers: [NSObjectProtocol] = []
     private var logCount = 0
     private let logger = Logger(subsystem: "com.nexlineai.voice", category: "spike")
 
-    private static let clipText = """
-        Echo test. I will keep talking for about twenty seconds, so the microphone hears me through the speaker. \
-        In the silent test, stay quiet and let me finish. Every time the app thinks you spoke is a false alarm, \
-        and with echo cancellation on there should be none. In the talk-over test, say something while I am \
-        still talking, and I should stop within a fraction of a second. Then switch echo cancellation off and \
-        run both tests again, so we can compare. The copy button puts the results on the clipboard. \
-        That is the end of the test.
-        """
+    var canTest: Bool { ready && setupName != nil && running == nil && !checking }
 
     func boot() async {
         guard !booted else { return }
@@ -111,29 +144,46 @@ final class SpikeModel: ObservableObject {
         engine.onEvent = { [weak self] message in
             Task { @MainActor in self?.note(message) }
         }
-        // Clip first, engine second, so speech synthesis can't reconfigure a running engine.
+        // A bundled recording, not on-device speech: the synthesizer added its own audio session
+        // to the process, one more thing that could reconfigure the engine.
         do {
-            clip = try await speech.render(Self.clipText)
+            let buffer = try Self.loadClip()
+            clip = [buffer]
+            note(String(format: "test clip ready, %.1f s", Double(buffer.frameLength) / buffer.format.sampleRate))
+            ready = true
         } catch {
-            // Worth knowing for the on-device fallback voice: does write() need the app's session?
-            // Safe to retry on it here, because the engine is not running yet.
-            note("test clip failed off the app's audio session (\(error)), retrying on it")
-            do {
-                clip = try await SpeechClip(usesApplicationAudioSession: true).render(Self.clipText)
-            } catch {
-                note("Could not render the test clip: \(error)")
-                return
-            }
+            note("Could not load the test clip: \(error)")
         }
-        let seconds = Double(clip.reduce(0) { $0 + Int($1.frameLength) }) / VoiceEngine.playbackFormat.sampleRate
-        note(String(format: "test clip ready, %.1f s", seconds))
+    }
+
+    func checkAudio() async {
+        guard ready, !checking, running == nil else { return }
+        checking = true
+        checks = []
+        setupName = nil
+        engine.autoRestart = false
+        for setup in Self.setups {
+            checks.append(await check(setup))
+        }
+        engine.stop()
+        engine.autoRestart = true
+        checking = false
+
+        guard let index = checks.firstIndex(where: \.passed) else {
+            note("no setup kept echo cancellation running")
+            return
+        }
+        let setup = Self.setups[index]
         do {
-            try engine.start(voiceProcessing: voiceProcessing)
+            try engine.configureSession(setup)
+            voiceProcessing = true
+            try engine.start(voiceProcessing: true)
+            detector = BargeInDetector()
+            setupName = setup.name
+            note("using \(setup.name)")
         } catch {
-            note("Audio engine failed: \(error.localizedDescription)")
+            note("could not start \(setup.name): \(error.localizedDescription)")
         }
-        ready = true
-        await checkSpeechLocales()
     }
 
     func setVoiceProcessing(_ on: Bool) {
@@ -142,7 +192,7 @@ final class SpikeModel: ObservableObject {
     }
 
     func start(_ kind: TestKind) {
-        guard ready, running == nil else { return }
+        guard canTest else { return }
         guard engine.isRunning else {
             note("audio engine is off: toggle echo cancellation to restart it")
             return
@@ -171,14 +221,45 @@ final class SpikeModel: ObservableObject {
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
         let head = "Nexline Voice audio spike, build \(build), iOS \(UIDevice.current.systemVersion)"
         // The log rides along, so a failed run can be diagnosed without a USB cable.
-        let lines = [head] + runs.reversed().map(\.line) + ["", localeReport, "", "Log:"] + log.suffix(30).map(\.text)
+        let lines = [head, "", "Check audio:"] + checks.map(\.line) + [""] + runs.reversed().map(\.line)
+            + ["", "Log:"] + log.suffix(30).map(\.text)
         UIPasteboard.general.string = lines.joined(separator: "\n")
         note("results copied")
     }
 
     // MARK: - Private
 
+    /// Starts `setup` with echo cancellation on and auto-restart off, waits 3 s, then measures 2 s.
+    private func check(_ setup: VoiceEngine.SessionSetup) async -> CheckResult {
+        let before = engine.configChanges
+        do {
+            try engine.configureSession(setup)
+            try engine.start(voiceProcessing: true)
+        } catch {
+            let result = CheckResult(setup: setup.name, error: error.localizedDescription, running: false,
+                                     configChanges: engine.configChanges - before, blocks: 0, meanDB: Level.silenceDB)
+            note(result.line)
+            return result
+        }
+        try? await Task.sleep(for: .seconds(3))
+        checkBlocks = 0
+        checkLevels = LevelStats()
+        measuring = true
+        try? await Task.sleep(for: .seconds(2))
+        measuring = false
+        let result = CheckResult(setup: setup.name, error: nil, running: engine.isRunning,
+                                 configChanges: engine.configChanges - before, blocks: checkBlocks,
+                                 meanDB: checkLevels.meanDB)
+        note(result.line)
+        engine.stop()
+        return result
+    }
+
     private func handle(_ block: VoiceEngine.MicBlock) {
+        if measuring {
+            checkBlocks += 1
+            checkLevels.add(block.levelDB)
+        }
         let playing = running != nil
         let detected = detector.process(levelDB: block.levelDB, durationMs: block.durationMs, playing: playing)
         meter.db = block.levelDB
@@ -203,8 +284,8 @@ final class SpikeModel: ObservableObject {
     private func finishRun(_ id: Int) {
         guard id == runID, let kind = running else { return }
         running = nil
-        let result = RunResult(kind: kind, echoCancellation: voiceProcessing, route: route, levels: levels,
-                               thresholdDB: detector.threshold(playing: true),
+        let result = RunResult(kind: kind, echoCancellation: voiceProcessing, setup: String(setupName?.prefix(1) ?? "?"),
+                               route: route, levels: levels, thresholdDB: detector.threshold(playing: true),
                                seconds: Date().timeIntervalSince(runStart),
                                detections: detections, firstDetectionSec: firstDetection)
         runs.insert(result, at: 0)
@@ -213,6 +294,7 @@ final class SpikeModel: ObservableObject {
 
     private func restartEngine() {
         stop()
+        guard setupName != nil else { return }
         do {
             try engine.start(voiceProcessing: voiceProcessing)
             detector = BargeInDetector()
@@ -254,27 +336,27 @@ final class SpikeModel: ObservableObject {
         }
     }
 
-    private func checkSpeechLocales() async {
-        let wanted = ["en-US", "en-GB", "pt-PT", "pt-BR", "nl-NL"]
-        let supported = Set(await SpeechTranscriber.supportedLocales.map { $0.identifier(.bcp47) })
-        let installed = Set(await SpeechTranscriber.installedLocales.map { $0.identifier(.bcp47) })
-        guard !supported.isEmpty else {
-            localeReport = "SpeechTranscriber: not supported on this device"
-            return
-        }
-        // Any Dutch variant at all, in case it is listed under another region or bare "nl".
-        let dutch = supported.filter { $0.hasPrefix("nl") }.sorted()
-        localeReport = (wanted.map { id in
-            let state = installed.contains(id) ? "installed" : supported.contains(id) ? "downloadable" : "not supported"
-            return "\(id): \(state)"
-        } + ["any nl: \(dutch.isEmpty ? "none" : dutch.joined(separator: ", "))"]).joined(separator: "\n")
-    }
-
     private func note(_ text: String) {
         logger.notice("\(text, privacy: .public)")
         logCount += 1
         log.append(LogLine(id: logCount, text: text))
         if log.count > 60 { log.removeFirst(log.count - 60) }
+    }
+
+    /// `test-clip.wav`: espeak-ng, 24 kHz mono, so it plays in `VoiceEngine.playbackFormat` as is.
+    private static func loadClip() throws -> AVAudioPCMBuffer {
+        guard let url = Bundle.main.url(forResource: "test-clip", withExtension: "wav") else { throw ClipError.missing }
+        let file = try AVAudioFile(forReading: url, commonFormat: .pcmFormatFloat32, interleaved: false)
+        let format = file.processingFormat
+        guard format.sampleRate == VoiceEngine.playbackFormat.sampleRate,
+              format.channelCount == VoiceEngine.playbackFormat.channelCount else {
+            throw ClipError.wrongFormat("\(format)")
+        }
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(file.length)) else {
+            throw ClipError.noBuffer
+        }
+        try file.read(into: buffer)
+        return buffer
     }
 
     private static func describeRoute() -> String {
