@@ -26,5 +26,7 @@ Plan, decisions and the feature cut-list are in the vault:
 - `NexlineAudio` (iOS only): `VoiceEngine` = one AVAudioEngine with voice processing for the mic and the
   player, so the bot can be interrupted without hearing itself. `SpeechClip` renders on-device speech
   for tests.
+- `AVSpeechSynthesizer` on the app's audio session reconfigures a running voice-processing engine and kills
+  its mic (0 Hz, build 1). Keep `usesApplicationAudioSession` off and render before the engine starts.
 - Playback format is 24 kHz mono float, the format xAI streams.
 - Logs use subsystem `com.nexlineai.voice`; read them on Omarchy with `idevicesyslog` over USB.

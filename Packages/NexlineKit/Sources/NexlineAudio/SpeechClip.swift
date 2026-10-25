@@ -17,7 +17,12 @@ public final class SpeechClip: @unchecked Sendable {
     private var received = 0
     private var continuation: CheckedContinuation<[AVAudioPCMBuffer], Error>?
 
-    public init() {}
+    /// With `usesApplicationAudioSession` on (the system default) the synthesizer re-activates the
+    /// app's session and changes its category and mode even for write(). On iOS 26 that reconfigured
+    /// a running voice-processing engine and left its mic at 0 Hz (spike build 1).
+    public init(usesApplicationAudioSession: Bool = false) {
+        synth.usesApplicationAudioSession = usesApplicationAudioSession
+    }
 
     public func render(_ text: String, language: String = "en-US") async throws -> [AVAudioPCMBuffer] {
         let utterance = AVSpeechUtterance(string: text)

@@ -31,21 +31,29 @@ final class SpikeModel: ObservableObject {
         let kind: TestKind
         let echoCancellation: Bool
         let route: String
-        let echo: LevelStats
+        /// Every mic block of the run. For the silent test this is the echo that got through.
+        let levels: LevelStats
+        let thresholdDB: Float
+        let seconds: Double
         let detections: Int
         let firstDetectionSec: Double?
 
         var line: String {
             let mode = "\(kind.rawValue), echo cancel \(echoCancellation ? "ON" : "OFF")"
+            // No blocks at all means a dead engine, which would otherwise read as a perfect -100 / 0.
+            guard levels.count > 0 else {
+                return String(format: "%@: NO MIC DATA after %.1f s, audio engine not running [%@]", mode, seconds, route)
+            }
             switch kind {
             case .silent:
-                return String(format: "%@: echo mean %.0f / peak %.0f dBFS, false alarms %d [%@]",
-                              mode, echo.meanDB, echo.peakDB, detections, route)
+                return String(format: "%@: %.1f s, echo mean %.0f / peak %.0f dBFS, false alarms %d [%@]",
+                              mode, seconds, levels.meanDB, levels.peakDB, detections, route)
             case .talkOver:
                 if let t = firstDetectionSec {
                     return String(format: "%@: stopped on your voice at %.1f s [%@]", mode, t, route)
                 }
-                return "\(mode): your voice was not detected [\(route)]"
+                return String(format: "%@: your voice was not detected in %.1f s, mic peak %.0f dBFS vs threshold %.0f [%@]",
+                              mode, seconds, levels.peakDB, thresholdDB, route)
             }
         }
     }
@@ -71,7 +79,7 @@ final class SpikeModel: ObservableObject {
     private var booted = false
     private var runID = 0
     private var runStart = Date()
-    private var echo = LevelStats()
+    private var levels = LevelStats()
     private var detections = 0
     private var firstDetection: Double?
     private var observers: [NSObjectProtocol] = []
@@ -103,20 +111,28 @@ final class SpikeModel: ObservableObject {
         engine.onEvent = { [weak self] message in
             Task { @MainActor in self?.note(message) }
         }
+        // Clip first, engine second, so speech synthesis can't reconfigure a running engine.
+        do {
+            clip = try await speech.render(Self.clipText)
+        } catch {
+            // Worth knowing for the on-device fallback voice: does write() need the app's session?
+            // Safe to retry on it here, because the engine is not running yet.
+            note("test clip failed off the app's audio session (\(error)), retrying on it")
+            do {
+                clip = try await SpeechClip(usesApplicationAudioSession: true).render(Self.clipText)
+            } catch {
+                note("Could not render the test clip: \(error)")
+                return
+            }
+        }
+        let seconds = Double(clip.reduce(0) { $0 + Int($1.frameLength) }) / VoiceEngine.playbackFormat.sampleRate
+        note(String(format: "test clip ready, %.1f s", seconds))
         do {
             try engine.start(voiceProcessing: voiceProcessing)
         } catch {
             note("Audio engine failed: \(error.localizedDescription)")
-            return
         }
-        do {
-            clip = try await speech.render(Self.clipText)
-            let seconds = Double(clip.reduce(0) { $0 + Int($1.frameLength) }) / VoiceEngine.playbackFormat.sampleRate
-            note(String(format: "test clip ready, %.1f s", seconds))
-            ready = true
-        } catch {
-            note("Could not render the test clip: \(error)")
-        }
+        ready = true
         await checkSpeechLocales()
     }
 
@@ -127,9 +143,13 @@ final class SpikeModel: ObservableObject {
 
     func start(_ kind: TestKind) {
         guard ready, running == nil else { return }
+        guard engine.isRunning else {
+            note("audio engine is off: toggle echo cancellation to restart it")
+            return
+        }
         runID += 1
         let id = runID
-        echo = LevelStats()
+        levels = LevelStats()
         detections = 0
         firstDetection = nil
         detector = BargeInDetector(initialFloorDB: detector.noiseFloorDB)
@@ -150,8 +170,9 @@ final class SpikeModel: ObservableObject {
     func copyResults() {
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
         let head = "Nexline Voice audio spike, build \(build), iOS \(UIDevice.current.systemVersion)"
-        UIPasteboard.general.string = ([head] + runs.reversed().map(\.line) + ["", localeReport])
-            .joined(separator: "\n")
+        // The log rides along, so a failed run can be diagnosed without a USB cable.
+        let lines = [head] + runs.reversed().map(\.line) + ["", localeReport, "", "Log:"] + log.suffix(30).map(\.text)
+        UIPasteboard.general.string = lines.joined(separator: "\n")
         note("results copied")
     }
 
@@ -165,7 +186,7 @@ final class SpikeModel: ObservableObject {
         meter.threshold = detector.threshold(playing: playing)
 
         guard let kind = running else { return }
-        if kind == .silent { echo.add(block.levelDB) }
+        levels.add(block.levelDB)
         guard detected else { return }
 
         detections += 1
@@ -182,7 +203,9 @@ final class SpikeModel: ObservableObject {
     private func finishRun(_ id: Int) {
         guard id == runID, let kind = running else { return }
         running = nil
-        let result = RunResult(kind: kind, echoCancellation: voiceProcessing, route: route, echo: echo,
+        let result = RunResult(kind: kind, echoCancellation: voiceProcessing, route: route, levels: levels,
+                               thresholdDB: detector.threshold(playing: true),
+                               seconds: Date().timeIntervalSince(runStart),
                                detections: detections, firstDetectionSec: firstDetection)
         runs.insert(result, at: 0)
         note(result.line)
@@ -239,10 +262,12 @@ final class SpikeModel: ObservableObject {
             localeReport = "SpeechTranscriber: not supported on this device"
             return
         }
-        localeReport = wanted.map { id in
+        // Any Dutch variant at all, in case it is listed under another region or bare "nl".
+        let dutch = supported.filter { $0.hasPrefix("nl") }.sorted()
+        localeReport = (wanted.map { id in
             let state = installed.contains(id) ? "installed" : supported.contains(id) ? "downloadable" : "not supported"
             return "\(id): \(state)"
-        }.joined(separator: "\n")
+        } + ["any nl: \(dutch.isEmpty ? "none" : dutch.joined(separator: ", "))"]).joined(separator: "\n")
     }
 
     private func note(_ text: String) {

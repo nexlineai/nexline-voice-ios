@@ -14,8 +14,14 @@ public final class VoiceEngine {
         public let durationMs: Double
     }
 
-    public enum EngineError: Error {
+    public enum EngineError: LocalizedError {
         case noMicrophone
+
+        public var errorDescription: String? {
+            switch self {
+            case .noMicrophone: return "no microphone input (0 Hz)"
+            }
+        }
     }
 
     /// 24 kHz mono float: the format xAI streams, so a TTS stream can be scheduled as it arrives.
@@ -33,6 +39,8 @@ public final class VoiceEngine {
     private var started = false
     private var configObserver: NSObjectProtocol?
     private var recentRestarts: [Date] = []
+    /// Bumped by every stop (and so every start), so a pending restart retry can tell it is stale.
+    private var generation = 0
     private let log = Logger(subsystem: "com.nexlineai.voice", category: "engine")
 
     public init() {}
@@ -81,6 +89,7 @@ public final class VoiceEngine {
     }
 
     public func stop() {
+        generation += 1
         if let observer = configObserver {
             NotificationCenter.default.removeObserver(observer)
             configObserver = nil
@@ -122,7 +131,14 @@ public final class VoiceEngine {
             try start(voiceProcessing: voiceProcessing)
             report("audio route changed, engine restarted")
         } catch {
-            report("engine restart failed: \(error.localizedDescription)")
+            // Mid-reconfiguration the mic can read 0 Hz for a moment. The failed start already
+            // dropped the observer, so nothing else would bring the engine back: retry shortly.
+            report("engine restart failed: \(error.localizedDescription), retrying")
+            let gen = generation
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                guard let self, self.generation == gen else { return }
+                self.restartAfterConfigurationChange()
+            }
         }
     }
 
