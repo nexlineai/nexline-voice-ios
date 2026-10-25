@@ -1,0 +1,51 @@
+# XcodeGen spec. The .xcodeproj is generated (`xcodegen generate`) and never committed,
+# so nobody hand-edits project files on Linux.
+name: NexlineVoice
+options:
+  bundleIdPrefix: com.nexlineai
+  deploymentTarget:
+    iOS: "26.0"
+packages:
+  NexlineKit:
+    path: Packages/NexlineKit
+settings:
+  base:
+    MARKETING_VERSION: "0.1.0"
+    # CI overrides this with the workflow run number; every upload needs a higher one.
+    CURRENT_PROJECT_VERSION: "1"
+    # Swift 5 mode until the audio callbacks are reworked for strict concurrency.
+    SWIFT_VERSION: "5.0"
+    TARGETED_DEVICE_FAMILY: "1"
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_USER_SCRIPT_SANDBOXING: "YES"
+targets:
+  NexlineVoice:
+    type: application
+    platform: iOS
+    sources:
+      - App
+    dependencies:
+      - package: NexlineKit
+        product: NexlineCore
+      - package: NexlineKit
+        product: NexlineAudio
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: Nexline Voice
+        # Explicit, so the build settings (and CI's run-number override) reach the plist.
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIBackgroundModes: [audio]
+        NSMicrophoneUsageDescription: Nexline Voice listens so you can talk to your agents.
+        NSSpeechRecognitionUsageDescription: Nexline Voice turns your speech into text on the device.
+        # HTTPS only, so the export questionnaire is skipped on every upload.
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.nexlineai.voice
+        PRODUCT_NAME: NexlineVoice
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    scheme: {}

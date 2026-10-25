@@ -1,0 +1,47 @@
+# Signed build -> TestFlight (internal testers only). Runs only for v* tags.
+# The job uses the `testflight` environment: it waits for the maintainer's approval, and that
+# environment is the ONLY place the App Store Connect key exists (never add repo-level secrets).
+# Never use pull_request_target here.
+name: testflight
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: testflight
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    runs-on: macos-26
+    environment: testflight
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: The tag must match MARKETING_VERSION (v0.1.0, or v0.1.0-2 for another build of it)
+        run: |
+          V="v$(sed -nE 's/^ *MARKETING_VERSION: *"?([0-9.]+)"?.*/\1/p' project.yml | head -n 1)"
+          case "$GITHUB_REF_NAME" in "$V"|"$V"-*) ;; *) echo "::error::tag $GITHUB_REF_NAME does not match $V"; exit 1;; esac
+      - run: xcodebuild -version
+      - name: Generate the Xcode project
+        run: brew install xcodegen && xcodegen generate
+      - name: Archive, sign, upload
+        run: scripts/ci-testflight.sh
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          BUILD_NUMBER: ${{ github.run_number }}
+      - name: Log tails
+        if: failure()
+        run: |
+          for f in build/*.log; do
+            [ -f "$f" ] || continue
+            tail -n 4 "$f" | sed -e 's/%/%25/g' -e "s#^#::error title=$(basename "$f")::#"
+          done
