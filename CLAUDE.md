@@ -26,9 +26,11 @@ Plan, decisions and the feature cut-list are in the vault:
 - `NexlineAudio` (iOS only): `VoiceEngine` = one AVAudioEngine with voice processing for the mic and the
   player, so the bot can be interrupted without hearing itself. `SpeechClip` renders on-device speech
   (unused since build 3; the spike plays the bundled espeak-ng `App/test-clip.wav`).
-- Open problem (builds 1-2): with voice processing on, the engine dies about 1 s after every start (AURemoteIO
-  -66635, mic at 0 Hz). It is not the speech synthesizer (build 2 ruled that out). Build 3's "Check audio" compares
-  four session setups (mode, A2DP, preferred rate); the vault note has the evidence. `configureSession` sets the
-  session once, and restarts only rebuild the engine.
+- Open problem (builds 1-3): enabling voice processing changes the IO formats while the engine is set up, so the
+  engine starts with a configuration change pending and stops itself right away. It is not the speech synthesizer
+  (build 2) and not the session mode, A2DP or sample rate (build 3, all four setups fail the same way). Rebuilding the
+  engine re-enables voice processing and loops. Build 4 resumes the same engine instead (reinstall the tap, prepare,
+  start; no session or voice-processing calls). Never answer a configuration change with a new engine. Evidence is
+  in the vault note.
 - Playback format is 24 kHz mono float, the format xAI streams.
 - Logs use subsystem `com.nexlineai.voice`; read them on Omarchy with `idevicesyslog` over USB.

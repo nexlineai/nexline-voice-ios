@@ -16,7 +16,8 @@ final class Meter: ObservableObject {
 /// Audio spike: proves echo cancellation + barge-in on the phone with no network and no keys.
 ///
 /// Check audio: tries each session setup with echo cancellation on and keeps the first whose engine
-/// stays up with live mic data (in builds 1-2 it died about 1 s after every start). Silent test: the
+/// is running with live mic data 3 s after starting (in builds 1-3 it stopped itself right after
+/// every start, and the engine now resumes after that). Silent test: the
 /// phone talks, the user stays quiet. The mic level it hears is the echo that got through, and every
 /// detection is a false alarm. Talk-over test: the user cuts in and playback must stop.
 @MainActor
@@ -161,12 +162,10 @@ final class SpikeModel: ObservableObject {
         checking = true
         checks = []
         setupName = nil
-        engine.autoRestart = false
         for setup in Self.setups {
             checks.append(await check(setup))
         }
         engine.stop()
-        engine.autoRestart = true
         checking = false
 
         guard let index = checks.firstIndex(where: \.passed) else {
@@ -229,7 +228,7 @@ final class SpikeModel: ObservableObject {
 
     // MARK: - Private
 
-    /// Starts `setup` with echo cancellation on and auto-restart off, waits 3 s, then measures 2 s.
+    /// Starts `setup` with echo cancellation on, waits 3 s (time to stop and resume), then measures 2 s.
     private func check(_ setup: VoiceEngine.SessionSetup) async -> CheckResult {
         let before = engine.configChanges
         do {

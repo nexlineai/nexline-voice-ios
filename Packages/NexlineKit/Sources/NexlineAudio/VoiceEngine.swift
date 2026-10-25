@@ -9,8 +9,9 @@ import os
 /// reference, so the mic stays open while the bot talks and the user can cut in (barge-in).
 /// The RN app could not do this: its recorder and player were separate audio units.
 ///
-/// The audio session is configured once (`configureSession`); `start` and every restart only
-/// rebuild the engine. Re-applying the session on each restart fed a stop/restart loop in build 2.
+/// The audio session is configured once (`configureSession`). After a configuration change the
+/// *same* engine is resumed: enabling voice processing changes the IO formats while the engine is
+/// set up, so a new engine stops itself again right after starting (the loop of spike builds 1-3).
 public final class VoiceEngine {
     public struct MicBlock: Sendable {
         public let levelDB: Float
@@ -53,9 +54,6 @@ public final class VoiceEngine {
     public var onMicBlock: (@Sendable (MicBlock) -> Void)?
     /// Engine messages worth showing in a log.
     public var onEvent: (@Sendable (String) -> Void)?
-    /// Rebuild the engine after a configuration change. Off while comparing setups, so a setup
-    /// that can't stay up shows as stopped instead of being papered over.
-    public var autoRestart = true
 
     public private(set) var voiceProcessing = true
     public private(set) var setup: SessionSetup?
@@ -65,8 +63,8 @@ public final class VoiceEngine {
     private var player = AVAudioPlayerNode()
     private var started = false
     private var configObserver: NSObjectProtocol?
-    private var recentRestarts: [Date] = []
-    /// Bumped by every stop (and so every start), so a pending restart can tell it is stale.
+    private var recentResumes: [Date] = []
+    /// Bumped by every stop (and so every start), so a pending resume can tell it is stale.
     private var generation = 0
     private let log = Logger(subsystem: "com.nexlineai.voice", category: "engine")
 
@@ -98,17 +96,7 @@ public final class VoiceEngine {
         try input.setVoiceProcessingEnabled(voiceProcessing)
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: Self.playbackFormat)
-
-        let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0 else { throw EngineError.noMicrophone }
-        let sink = onMicBlock
-        let rate = format.sampleRate
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-            guard let channels = buffer.floatChannelData else { return }
-            let frames = Int(buffer.frameLength)
-            let db = Level.rmsDB(UnsafeBufferPointer(start: channels[0], count: frames))
-            sink?(MicBlock(levelDB: db, durationMs: Double(frames) / rate * 1000))
-        }
+        try installMicTap()
 
         configObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
@@ -119,7 +107,7 @@ public final class VoiceEngine {
         engine.prepare()
         try engine.start()
         started = true
-        report("engine on: echo cancellation \(voiceProcessing ? "on" : "off"), mic \(Int(rate)) Hz × \(format.channelCount)")
+        report("engine on: echo cancellation \(voiceProcessing ? "on" : "off"), \(formats)")
     }
 
     public func stop() {
@@ -151,30 +139,57 @@ public final class VoiceEngine {
         player.stop()
     }
 
-    private func configurationChanged() {
-        configChanges += 1
-        report("configuration change #\(configChanges), engine \(engine.isRunning ? "still running" : "stopped")")
-        guard autoRestart else { return }
-        // A route change (headphones, car) stops the engine. Let the route settle, then rebuild.
-        scheduleRestart(after: 0.5)
+    /// Input and output formats as the engine sees them now, for the log.
+    private var formats: String {
+        let i = engine.inputNode.outputFormat(forBus: 0)
+        let o = engine.outputNode.outputFormat(forBus: 0)
+        return "mic \(Int(i.sampleRate)) Hz × \(i.channelCount), out \(Int(o.sampleRate)) Hz × \(o.channelCount)"
     }
 
-    private func scheduleRestart(after seconds: Double) {
-        let gen = generation
-        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
-            guard let self, self.generation == gen, !self.engine.isRunning else { return }
-            let now = Date()
-            self.recentRestarts = self.recentRestarts.filter { now.timeIntervalSince($0) < 60 } + [now]
-            guard self.recentRestarts.count <= 5 else {
-                self.report("audio keeps reconfiguring, stopped restarting (toggle echo cancellation to retry)")
-                return
-            }
-            do {
-                try self.start(voiceProcessing: self.voiceProcessing)
-                self.report("engine restarted")
-            } catch {
-                self.report("engine restart failed: \(error.localizedDescription), retrying in 1 s")
-                self.scheduleRestart(after: 1)
+    /// (Re)installs the level tap with the input's current format, so the tap never runs on a stale rate.
+    private func installMicTap() throws {
+        let input = engine.inputNode
+        let format = input.outputFormat(forBus: 0)
+        guard format.sampleRate > 0, format.channelCount > 0 else { throw EngineError.noMicrophone }
+        let sink = onMicBlock
+        let rate = format.sampleRate
+        input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
+            guard let channels = buffer.floatChannelData else { return }
+            let frames = Int(buffer.frameLength)
+            let db = Level.rmsDB(UnsafeBufferPointer(start: channels[0], count: frames))
+            sink?(MicBlock(levelDB: db, durationMs: Double(frames) / rate * 1000))
+        }
+    }
+
+    private func configurationChanged() {
+        configChanges += 1
+        report("configuration change #\(configChanges), engine \(engine.isRunning ? "still running" : "stopped"), \(formats)")
+        guard started, !engine.isRunning else { return }
+        resume(attempt: 1)
+    }
+
+    /// Starts the same engine again: nodes stay attached, and the session and voice processing are
+    /// left alone, because re-enabling voice processing is what changes the formats in the first place.
+    private func resume(attempt: Int) {
+        let now = Date()
+        recentResumes = recentResumes.filter { now.timeIntervalSince($0) < 60 } + [now]
+        guard recentResumes.count <= 5 else {
+            report("audio keeps reconfiguring, stopped resuming (toggle echo cancellation to retry)")
+            return
+        }
+        do {
+            engine.inputNode.removeTap(onBus: 0)
+            try installMicTap()
+            engine.prepare()
+            try engine.start()
+            report("engine resumed, \(formats)")
+        } catch {
+            report("resume failed (attempt \(attempt)): \(error.localizedDescription), \(formats)")
+            guard attempt < 3 else { return }
+            let gen = generation
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self, self.generation == gen, self.started, !self.engine.isRunning else { return }
+                self.resume(attempt: attempt + 1)
             }
         }
     }
