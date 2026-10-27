@@ -188,7 +188,7 @@ private struct BlockView: View {
         case .media(_, .radio):
             RadioCard()
         case .media(let url, let kind):
-            if MediaKind.playsInline(url.absoluteString, kind) && TalkModel.keysPresent() {
+            if MediaKind.playsInline(url.absoluteString, kind) && TalkModel.keysCached {
                 AudioCard(url: url, kind: kind)
             } else {
                 CardButton(icon: Self.icon(kind), title: kind.label, subtitle: Self.shortLink(url)) {

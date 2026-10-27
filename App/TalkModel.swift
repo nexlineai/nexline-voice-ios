@@ -222,7 +222,7 @@ final class TalkModel: ObservableObject {
         bargeInOn = Prefs.bool(Prefs.bargeIn, default: true)
         resumeVoiceAfterMusic = false
         pausedForMusic = false
-        InlineAudio.shared.stop()
+        InlineAudio.shared.yieldToVoice()
         await start()
     }
 
@@ -303,7 +303,11 @@ final class TalkModel: ObservableObject {
 
     func keysChanged() {
         keysSet = Self.keysPresent()
+        Self.keysCached = keysSet
     }
+
+    /// For views that can't observe the model (reply blocks), so streaming doesn't read the Keychain per frame.
+    static var keysCached = TalkModel.keysPresent()
 
     // MARK: The shared conversation
 

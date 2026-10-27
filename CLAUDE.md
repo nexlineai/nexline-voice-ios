@@ -44,6 +44,21 @@ Plan, decisions and the feature cut-list are in the vault:
   `parseBlocks` port: lines, code, images (`/media/` made absolute, loaded with the token by `NexaClient`),
   media cards, `OPEN:` app links (`AppLauncher`: app scheme, then web; voice mode opens once after the reply
   ends), camera and HA markers. Parity with the RN app is the default (Zé, 27 Oct): its `src/` is the spec.
+- UI (27 Oct, build 12+): the RN app's design made native and better: Zé wants it *much better than the RN app*,
+  never a plain rebuild, and never to re-test what already works. RN `app/` + `src/components` are the design spec.
+  `Theme` (palette, Liquid Glass `glassCard`, `AmbientBackground` = animated MeshGradient in the bot's colour,
+  `Avatar`), `HomeView` (agents + Home/Settings), `ChatView` (railed bubbles in `MessageViews`, tool traces, slash
+  commands, photo attach, live mode), `VoiceModeView` (`AuraOrb`: Canvas particle halo + bars driven by
+  `VoiceLevels` = her queued audio's RMS windows and the mic level; mute, standby, end), `DevicesView` +
+  `HomeStore`/`CameraFrame`/`HADeviceCard` (serve.py `/ha/*`), `InlineAudio` (+ `AudioCard`, `NowPlayingBar`:
+  serve.py `/youtube/stream` proxy, 503 = warming, lock-screen controls; voice pauses while a mix plays),
+  `SettingsView` (per-agent engine/voice with preview, model override, keys), `Intents` (App Shortcut "Talk to
+  Nexa"), `Router` (navigation, voice cover, `nexlinevoice://voice|chat|home/<bot>`).
+- One `TalkModel` for the whole app (created in `NexlineVoiceApp`): two voice-processing engines would fight. Agents
+  are a seam on it (`select(bot)`, `replies()` → `NexaClient.chat` or `AgentClient`, OpenAI SSE with Bearer key +
+  `X-Hermes-Session-Id`); `ChatStore` keeps Carapava/Mamadona chats (and a Nexa cache) on the phone. Standby
+  (name gate + conversation window), mute and the music hand-off sit around the tested listen/send/speak path,
+  which must stay as it is. Standby defaults off.
 - Listening: `MicRouter` hands mic buffers to `DeepgramListener` (Nova-3 streaming, keyterms, `speech_final` /
   `UtteranceEnd` end the turn via `Endpointer.speechEnded`) or `Listener` (iOS 26 SpeechAnalyzer, on-device).
   Deepgram failing at start or mid-session switches to `Listener`. Deepgram results carry their audio end time;

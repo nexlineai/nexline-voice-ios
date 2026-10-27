@@ -128,6 +128,17 @@ final class InlineAudio: ObservableObject {
         Task { await releaseVoice() }
     }
 
+    /// Voice is starting and owns the audio session now: drop the mix without deactivating the session or
+    /// asking voice to come back (a deferred `stop()` would switch the new voice session off).
+    func yieldToVoice() {
+        session += 1
+        teardown()
+        url = nil
+        state = .idle
+        holdsVoice = false
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+    }
+
     func seek(fraction: Double) {
         guard duration > 0 else { return }
         seek(seconds: max(0, min(1, fraction)) * duration)

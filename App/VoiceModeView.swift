@@ -10,8 +10,11 @@ struct VoiceModeView: View {
     @EnvironmentObject private var router: Router
     @State private var debug = false
     @State private var showLog = false
-    /// Lines already there when voice mode opened: only what is said from now on is shown.
-    @State private var startCount: Int?
+    /// Only what is said after voice mode opened is shown. Kept here, so a history refresh (serve.py keeps no
+    /// times, and trims its history) can't make the last exchange vanish from the screen.
+    @State private var openedAt: Date?
+    @State private var question: String?
+    @State private var reply: TalkModel.Line?
 
     var body: some View {
         ZStack {
@@ -62,9 +65,10 @@ struct VoiceModeView: View {
             }
         }
         .statusBarHidden(false)
+        .onChange(of: talk.lines) { _, lines in capture(lines) }
         .task {
+            openedAt = Date()
             await talk.select(bot)
-            startCount = talk.lines.count
             if talk.phase == .off && !talk.pausedForMusic {
                 await talk.startVoice(standby: Prefs.bool(Prefs.standby, default: false))
             }
@@ -97,15 +101,20 @@ struct VoiceModeView: View {
 
     // MARK: What is being said
 
-    private var newLines: [TalkModel.Line] {
-        guard talk.bot == bot, let startCount, talk.lines.count > startCount else { return [] }
-        return Array(talk.lines.suffix(from: min(startCount, talk.lines.count)))
+    private func capture(_ lines: [TalkModel.Line]) {
+        guard let openedAt, talk.bot == bot else { return }
+        let recent = lines.filter { ($0.time ?? .distantPast) >= openedAt }
+        guard let last = recent.last else { return }
+        if last.fromUser {
+            question = last.text
+            reply = nil
+        } else {
+            reply = last
+            if let asked = recent.last(where: { $0.fromUser }) { question = asked.text }
+        }
     }
 
     @ViewBuilder private var transcript: some View {
-        let recent = newLines
-        let reply = recent.last.flatMap { $0.fromUser ? nil : $0 }
-        let question = recent.last(where: { $0.fromUser })
         VStack(spacing: 12) {
             if let reply, reply.failed {
                 Text(reply.text).font(.footnote).foregroundStyle(Theme.coral).multilineTextAlignment(.center)
@@ -123,7 +132,7 @@ struct VoiceModeView: View {
                     .onChange(of: reply.text) { _, _ in proxy.scrollTo("end", anchor: .bottom) }
                 }
             } else if let question {
-                Text("“\(question.text)”")
+                Text("“\(question)”")
                     .font(.body.italic())
                     .foregroundStyle(Theme.muted)
                     .multilineTextAlignment(.center)
