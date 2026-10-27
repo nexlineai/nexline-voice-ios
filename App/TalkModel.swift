@@ -28,10 +28,22 @@ final class TalkModel: ObservableObject {
         case speaking = "Speaking"
     }
 
-    struct Line: Identifiable, Equatable {
+    struct Line: Identifiable, Equatable, Codable {
         var id = UUID().uuidString
         let fromUser: Bool
         var text: String
+        /// When it was said; unknown for messages loaded from serve.py.
+        var time: Date? = nil
+        /// A photo sent with it (a file in `ChatStore`).
+        var imageFile: String? = nil
+        /// The turn failed and `text` says why.
+        var failed = false
+    }
+
+    /// A tool Hermes is running for the current reply.
+    struct ToolTrace: Identifiable, Equatable {
+        let id: String
+        var done: Bool
     }
 
     struct LogLine: Identifiable {
@@ -47,8 +59,26 @@ final class TalkModel: ObservableObject {
 
     @Published private(set) var phase: Phase = .off
     @Published private(set) var hearing = ""
-    /// The shared conversation (kiosk included), refreshed from serve.py while the app is open.
-    @Published private(set) var lines: [Line] = []
+    /// Who the conversation is with. Voice and chat follow it.
+    @Published private(set) var bot: Bot = .nexa
+    /// The conversation with `bot`. Nexa's is the shared one (kiosk included), refreshed from serve.py while the
+    /// app is open; the others are kept on the phone.
+    @Published private(set) var lines: [Line] = [] {
+        didSet { ChatStore.shared.save(bot, lines) }
+    }
+    @Published private(set) var tools: [ToolTrace] = []
+    /// Mic off: she can keep talking, nothing is heard and nothing cuts her off.
+    @Published var muted = false
+    /// Standby: only sentences that start with her name count (then the conversation window keeps her awake).
+    @Published var standby = false
+    /// False while standby waits for her name.
+    @Published private(set) var awake = true
+    /// Voice is off because a mix is playing; it comes back when the mix stops.
+    @Published private(set) var pausedForMusic = false
+    /// "first audio 1.2 s" for the voice screen's debug line.
+    @Published private(set) var lastTiming: String?
+    /// Her voice and the mic level, read by the voice screen every frame (not published).
+    let levels = VoiceLevels()
     /// A typed message is being answered while voice is off.
     @Published private(set) var typing = false
     @Published private(set) var log: [LogLine] = []
@@ -59,7 +89,7 @@ final class TalkModel: ObservableObject {
     /// Setup A from the audio spike (build 4): passed with echo cancellation on.
     private static let setup = VoiceEngine.SessionSetup(
         name: "default mode + A2DP", mode: .default, options: [.defaultToSpeaker, .allowBluetoothA2DP])
-    private static let localeID = "en-US"
+    private static var localeID: String { SpeechLanguage.current.locale }
 
     private let engine = VoiceEngine()
     private let listener = Listener()
@@ -80,6 +110,10 @@ final class TalkModel: ObservableObject {
     private var observers: [NSObjectProtocol] = []
     private var logCount = 0
     private let logger = Logger(subsystem: "com.nexlineai.voice", category: "talk")
+
+    private var bargeInOn = true
+    private var windowUntil = 0.0
+    private var resumeVoiceAfterMusic = false
 
     /// Bumped by every new turn and every cut-in, so work from an older turn can tell it is stale.
     private var generation = 0
@@ -114,7 +148,152 @@ final class TalkModel: ObservableObject {
         engine.onEvent = { [weak self] message in
             Task { @MainActor in self?.note(message) }
         }
+        lines = ChatStore.shared.lines(.nexa)
         observeSession()
+    }
+
+    // MARK: Bots
+
+    /// Switches the conversation to `newBot` (stopping voice if it runs for another one).
+    func select(_ newBot: Bot) async {
+        guard newBot != bot else { return }
+        if phase != .off { await endVoice() }
+        typedTask?.cancel()
+        typedTask = nil
+        typing = false
+        bot = newBot
+        lines = ChatStore.shared.lines(newBot)
+        tools = []
+        hearing = ""
+        historyProblem = nil
+        if newBot == .nexa { await refreshHistory() }
+    }
+
+    /// Nexa needs her Access token; the others only their own key, checked when they are asked.
+    var canChat: Bool { bot != .nexa || keysSet }
+
+    /// The reply stream for this turn: serve.py for Nexa, the gateway for the others.
+    private func replies(_ text: String, image: String?) -> AsyncThrowingStream<ChatStreamParser.Event, Error> {
+        if bot == .nexa { return nexa.chat(text, image: image) }
+        return AgentClient.chat(bot, text: text, history: Array(lines.dropLast(2)), image: image)
+    }
+
+    private func trace(_ label: String, _ status: String) {
+        let name = label.replacingOccurrences(of: "mcp_", with: "").replacingOccurrences(of: "_mcp_", with: "_")
+        let done = status == "completed" || status == "done"
+        if let index = tools.firstIndex(where: { $0.id == name }) {
+            tools[index].done = done
+        } else {
+            tools.append(ToolTrace(id: name, done: done))
+        }
+    }
+
+    private func showFailure(_ error: Error) {
+        guard let last = lines.indices.last, !lines[last].fromUser else { return }
+        lines[last].text = error.localizedDescription
+        lines[last].failed = true
+    }
+
+    /// Empties the conversation. Nexa's goes on serve.py too, so the kiosk starts fresh as well.
+    func clearChat() async {
+        if phase == .thinking || phase == .speaking { cutReply(report: false) }
+        typedTask?.cancel()
+        typing = false
+        if bot == .nexa { try? await nexa.post("history/clear") }
+        lines = []
+        tools = []
+        ChatStore.shared.clear(bot)
+    }
+
+    /// After the stored chats changed (Settings › Clear all chats).
+    func reloadLines() {
+        lines = ChatStore.shared.lines(bot)
+    }
+
+    // MARK: Voice mode
+
+    /// Starts voice for the current bot. Standby is chosen by the screen: voice mode follows the setting, live
+    /// chat never waits for the name (the user just tapped to talk).
+    func startVoice(standby: Bool) async {
+        self.standby = standby
+        windowUntil = 0
+        awake = !standby
+        muted = false
+        bargeInOn = Prefs.bool(Prefs.bargeIn, default: true)
+        resumeVoiceAfterMusic = false
+        pausedForMusic = false
+        InlineAudio.shared.stop()
+        await start()
+    }
+
+    func endVoice() async {
+        resumeVoiceAfterMusic = false
+        pausedForMusic = false
+        await stop()
+    }
+
+    func setStandby(_ on: Bool) {
+        standby = on
+        windowUntil = 0
+        awake = !on
+    }
+
+    /// Tap on the orb: stop her now (like talking over her).
+    func hush() {
+        if phase == .thinking || phase == .speaking { cutIn() }
+    }
+
+    /// A mix needs the audio session without voice processing (it gates music to near silence), so voice stops
+    /// while it plays and starts again after.
+    func pauseForMusic() async {
+        guard phase != .off else { return }
+        resumeVoiceAfterMusic = true
+        pausedForMusic = true
+        await stop()
+    }
+
+    func musicStopped() async {
+        guard resumeVoiceAfterMusic else { return }
+        resumeVoiceAfterMusic = false
+        pausedForMusic = false
+        await start()
+    }
+
+    /// Standby lets a sentence through when it starts with her name ("Hey Nexa, …"), or while the conversation
+    /// window from the last one is still open.
+    private func admits(_ text: String) -> Bool {
+        guard standby else { return true }
+        if Self.now < windowUntil {
+            openWindow()
+            return true
+        }
+        let lowered = text.lowercased().replacingOccurrences(
+            of: "^(hey|ok|okay|oi|olá|ola)[\\s,]+", with: "", options: .regularExpression)
+        let words = lowered.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
+        guard let first = words.first else { return false }
+        let firstTwo = words.prefix(2).joined(separator: " ")
+        guard bot.wakeNames.contains(first) || bot.wakeNames.contains(firstTwo) else { return false }
+        openWindow()
+        return true
+    }
+
+    /// Sliding: every accepted sentence and every reply pushes it out, so only real silence re-arms the name.
+    private func openWindow() {
+        let minutes = Prefs.conversationWindowMinutes
+        windowUntil = minutes > 0 ? Self.now + Double(minutes * 60) : 0
+    }
+
+    // MARK: Media
+
+    /// The newest reply's mix starts by itself (only replies that arrived now, never history).
+    private func autoplayMedia(in reply: String) {
+        guard keysSet, Prefs.bool(Prefs.autoplayMedia, default: true) else { return }
+        for block in ReplyBlocks.parse(reply) {
+            if case .media(let url, let kind) = block, MediaKind.playsInline(url.absoluteString, kind) {
+                InlineAudio.shared.play(url: url, kind: kind, autoplay: true)
+                return
+            }
+        }
     }
 
     /// Only Nexa's token is required: without the xAI or Deepgram key the fallbacks take over.
@@ -147,11 +326,20 @@ final class TalkModel: ObservableObject {
     /// Never during a turn (it would replace the reply being streamed), and not with fewer messages than shown
     /// right after a turn, when serve.py may not have saved it yet.
     private func refreshHistory() async {
-        guard keysSet, !turnBusy else { return }
+        guard keysSet, bot == .nexa, !turnBusy else { return }
         do {
             let messages = try await nexa.history()
-            guard !turnBusy else { return }
-            let fresh = messages.enumerated().map { Line(id: "h\($0.offset)", fromUser: $0.element.fromUser, text: $0.element.text) }
+            guard bot == .nexa, !turnBusy else { return }
+            let old = lines
+            let fresh = messages.enumerated().map { item -> Line in
+                var line = Line(id: "h\(item.offset)", fromUser: item.element.fromUser, text: item.element.text)
+                // serve.py keeps no times; keep the ones this phone saw.
+                if item.offset < old.count, old[item.offset].text == line.text {
+                    line.time = old[item.offset].time
+                    line.imageFile = old[item.offset].imageFile
+                }
+                return line
+            }
             if historyProblem != nil || lines.isEmpty && !fresh.isEmpty {
                 note("conversation: \(fresh.count) messages from serve.py")
             }
@@ -173,49 +361,59 @@ final class TalkModel: ObservableObject {
 
     /// A typed message. With voice on it is a turn like a spoken one (and cuts Nexa off if she is talking);
     /// with voice off the reply only shows as text.
-    func sendTyped(_ raw: String) {
+    func sendTyped(_ raw: String, photo: Data? = nil) {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, keysSet else { return }
+        guard !text.isEmpty || photo != nil, canChat else { return }
+        let jpeg = photo.flatMap(PhotoPrep.jpeg)
         switch phase {
         case .off:
-            sendTextOnly(text)
+            sendTextOnly(text, photo: jpeg)
         case .starting:
             return
         case .listening:
             endpointer.reset()
             hearing = ""
-            send(text)
+            send(text, photo: jpeg)
         case .thinking, .speaking:
             cutIn()
             endpointer.reset()
-            send(text)
+            send(text, photo: jpeg)
         }
     }
 
-    private func sendTextOnly(_ text: String) {
+    private func sendTextOnly(_ text: String, photo: Data? = nil) {
         typedTask?.cancel()
-        lines.append(Line(fromUser: true, text: text))
-        lines.append(Line(fromUser: false, text: ""))
+        lines.append(Line(fromUser: true, text: text, time: Date(), imageFile: photo.flatMap { ChatStore.shared.storePhoto($0) }))
+        lines.append(Line(fromUser: false, text: "", time: Date()))
         lastTurnAt = Self.now
         typing = true
+        tools = []
+        let stream = replies(text, image: photo.map(PhotoPrep.dataURI))
         typedTask = Task { [weak self] in
             guard let self else { return }
             var reply = ""
             do {
-                for try await event in self.nexa.chat(text) {
-                    if case .text(let full) = event {
+                for try await event in stream {
+                    switch event {
+                    case .text(let full):
                         reply = full
                         self.showReply(full)
+                    case .tool(let label, let status):
+                        self.trace(label, status)
+                    case .done:
+                        break
                     }
                 }
             } catch {
                 if !Task.isCancelled {
-                    self.note("Nexa: \(error.localizedDescription)")
-                    if reply.isEmpty { self.showReply("(no reply: \(error.localizedDescription))") }
+                    self.note("\(self.bot.name): \(error.localizedDescription)")
+                    if reply.isEmpty { self.showFailure(error) }
                 }
             }
             self.lastTurnAt = Self.now
             self.typing = false
+            self.tools = []
+            if !Task.isCancelled && !reply.isEmpty { self.autoplayMedia(in: reply) }
         }
     }
 
@@ -227,13 +425,14 @@ final class TalkModel: ObservableObject {
 
     func start() async {
         guard phase == .off else { return }
-        guard keysSet else {
+        guard canChat else {
             note("add Nexa's token first (Settings)")
             return
         }
         phase = .starting
-        let voice = VoiceChoice.current
-        voices.reset(primary: voice)
+        let botVoice = BotVoice.current(bot)
+        let voice = botVoice.engine
+        voices.reset(primary: voice, xai: botVoice.xai, deepgram: botVoice.deepgram)
         note("voice: " + voice.chain.map(\.name).joined(separator: " → "))
         do {
             try engine.configureSession(Self.setup)
@@ -322,13 +521,14 @@ final class TalkModel: ObservableObject {
         let playing = self.playing
         meter.db = block.levelDB
         meter.threshold = detector.threshold(playing: playing)
+        levels.micDB = muted ? Level.silenceDB : block.levelDB
         if !playing && block.levelDB > detector.threshold(playing: false) { lastLoudAt = Self.now }
         let speech = detector.process(levelDB: block.levelDB, durationMs: block.durationMs, playing: playing)
-        if speech && phase == .speaking { cutIn() }
+        if speech && phase == .speaking && bargeInOn && !muted { cutIn() }
     }
 
     private func recognized(_ text: String, isFinal: Bool, endsAt: Double?) {
-        guard phase == .listening else { return }
+        guard phase == .listening, !muted else { return }
         // Deepgram's results arrive late: one whose audio ended before listening began is Nexa's echo.
         if let endsAt, endsAt < listeningSince { return }
         endpointer.add(text, isFinal: isFinal, at: Self.now)
@@ -342,12 +542,18 @@ final class TalkModel: ObservableObject {
 
     private func tick() {
         let now = Self.now
+        let isAwake = !standby || now < windowUntil
+        if awake != isAwake { awake = isAwake }
         switch phase {
         case .listening:
             guard let text = endpointer.take(at: now) else { return }
             hearing = ""
             guard lastLoudAt >= listeningSince else {
                 note("ignored, the mic never heard you loud enough (echo?): \"\(text)\"")
+                return
+            }
+            guard admits(text) else {
+                note("standby, not for \(bot.name): \"\(text)\"")
                 return
             }
             send(text)
@@ -371,11 +577,12 @@ final class TalkModel: ObservableObject {
 
     // MARK: Nexa's turn
 
-    private func send(_ text: String) {
+    private func send(_ text: String, photo: Data? = nil) {
         generation += 1
         let gen = generation
-        lines.append(Line(fromUser: true, text: text))
-        lines.append(Line(fromUser: false, text: ""))
+        lines.append(Line(fromUser: true, text: text, time: Date(), imageFile: photo.flatMap { ChatStore.shared.storePhoto($0) }))
+        lines.append(Line(fromUser: false, text: "", time: Date()))
+        tools = []
         lastTurnAt = Self.now
         phase = .thinking
         turnEndedAt = Self.now
@@ -387,12 +594,13 @@ final class TalkModel: ObservableObject {
         playbackEnd = 0
         note("you: \(text)")
 
+        let stream = replies(text, image: photo.map(PhotoPrep.dataURI))
         chatTask = Task { [weak self] in
             guard let self else { return }
             var flusher = SentenceFlusher()
             var reply = ""
             do {
-                for try await event in self.nexa.chat(text) {
+                for try await event in stream {
                     guard gen == self.generation else { return }
                     switch event {
                     case .text(let full):
@@ -402,6 +610,7 @@ final class TalkModel: ObservableObject {
                         if let piece = flusher.take(full, final: false) { self.speak(piece, gen) }
                     case .tool(let label, let status):
                         self.note("tool: \(label) \(status)")
+                        self.trace(label, status)
                         // "Let me check." has no space after it until the tools finish, so speak it now
                         // instead of seconds later (build 9: first audio 8 s after first text).
                         if let piece = flusher.take(reply, final: true) { self.speak(piece, gen) }
@@ -413,8 +622,8 @@ final class TalkModel: ObservableObject {
                 if let piece = flusher.take(reply, final: true) { self.speak(piece, gen) }
             } catch {
                 guard gen == self.generation else { return }
-                self.note("Nexa: \(error.localizedDescription)")
-                if reply.isEmpty { self.showReply("(no reply: \(error.localizedDescription))") }
+                self.note("\(self.bot.name): \(error.localizedDescription)")
+                if reply.isEmpty { self.showFailure(error) }
             }
             self.replyOpen = false
         }
@@ -488,11 +697,13 @@ final class TalkModel: ObservableObject {
         let seconds = engine.enqueue(samples)
         guard seconds > 0 else { return startAt }
         playbackEnd = startAt + seconds
+        levels.addSpeech(samples, start: startAt, seconds: seconds)
         if firstAudioAt == nil {
             firstAudioAt = now
             phase = .speaking
             let text = firstTextAt.map { String(format: "first text %.1f s, ", $0 - turnEndedAt) } ?? ""
             note(String(format: "%@first audio %.1f s after your turn ended", text, now - turnEndedAt))
+            lastTiming = String(format: "%@first audio %.1f s", text, now - turnEndedAt)
         }
         return startAt
     }
@@ -501,8 +712,11 @@ final class TalkModel: ObservableObject {
         chatTask = nil
         speakTask = nil
         lastTurnAt = Self.now
+        tools = []
+        if standby { openWindow() }
         launchOpenLine()
         beginListening()
+        if let reply = lines.last(where: { !$0.fromUser })?.text { autoplayMedia(in: reply) }
     }
 
     /// Voice mode opens the app a reply asks for ("play X on YouTube" → OPEN:youtube:X), once, after the reply
@@ -527,6 +741,7 @@ final class TalkModel: ObservableObject {
         replyOpen = false
         engine.stopPlayback()
         playbackEnd = 0
+        levels.clearSpeech()
         if report {
             let client = self.nexa
             Task { await client.reportInterrupt(heard: heard) }
@@ -588,6 +803,30 @@ final class TalkModel: ObservableObject {
                 note("voice \(choice.name): FAIL, \(error.localizedDescription)")
             }
         }
+        engine.stop()
+    }
+
+    /// Settings: one sentence in a voice, so a choice can be heard before it is kept. Only while voice is off.
+    func previewVoice(_ choice: VoiceChoice, xai: String, deepgram: String) async {
+        guard !checking, phase == .off else { return }
+        checking = true
+        defer { checking = false }
+        do {
+            try engine.configureSession(Self.setup)
+            try engine.start(voiceProcessing: true)
+        } catch {
+            note("voice preview: \(error.localizedDescription)")
+            return
+        }
+        var seconds = 0.0
+        do {
+            for try await chunk in VoiceChain.source(choice, "Hey, this is how I sound now.", xai: xai, deepgram: deepgram) {
+                seconds += engine.enqueue(chunk)
+            }
+        } catch {
+            note("voice preview \(choice.name): \(error.localizedDescription)")
+        }
+        try? await Task.sleep(for: .seconds(seconds + 0.3))
         engine.stop()
     }
 

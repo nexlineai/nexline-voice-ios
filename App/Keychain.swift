@@ -9,6 +9,8 @@ enum Keychain {
         case nexaClientSecret = "nexa.cf-access-client-secret"
         case xaiKey = "xai.api-key"
         case deepgramKey = "deepgram.api-key"
+        case carapavaKey = "carapava.api-key"
+        case mamadonaKey = "mamadona.api-key"
     }
 
     private static let service = "com.nexlineai.voice"

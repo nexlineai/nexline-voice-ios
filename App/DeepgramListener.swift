@@ -170,10 +170,12 @@ final class DeepgramListener: @unchecked Sendable {
     // MARK: Private
 
     private static func request(key: String) -> URLRequest {
+        // One language at a time (Settings); the names as keyterms only help English.
+        let language = SpeechLanguage.current
         var components = URLComponents(string: "wss://api.deepgram.com/v1/listen")!
         components.queryItems = [
             URLQueryItem(name: "model", value: "nova-3"),
-            URLQueryItem(name: "language", value: "en"),
+            URLQueryItem(name: "language", value: language.rawValue),
             URLQueryItem(name: "encoding", value: "linear16"),
             URLQueryItem(name: "sample_rate", value: "16000"),
             URLQueryItem(name: "channels", value: "1"),
@@ -181,7 +183,7 @@ final class DeepgramListener: @unchecked Sendable {
             URLQueryItem(name: "smart_format", value: "true"),
             URLQueryItem(name: "endpointing", value: "500"),
             URLQueryItem(name: "utterance_end_ms", value: "1400"),
-        ] + keyterms.map { URLQueryItem(name: "keyterm", value: $0) }
+        ] + (language == .en ? keyterms.map { URLQueryItem(name: "keyterm", value: $0) } : [])
         var request = URLRequest(url: components.url!)
         request.setValue("Token \(key)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = 10

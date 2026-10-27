@@ -14,11 +14,16 @@ final class VoiceChain {
 
     private var chain: [VoiceChoice] = VoiceChoice.xai.chain
     private var down: Set<VoiceChoice> = []
+    /// The bot's voice on each engine.
+    private var xaiVoice = XAIVoice.nexaVoice
+    private var deepgramVoice = DeepgramVoice.nexaVoice
 
     /// Starts a session with `primary` first. Voices marked down get another chance.
-    func reset(primary: VoiceChoice) {
+    func reset(primary: VoiceChoice, xai: String = XAIVoice.nexaVoice, deepgram: String = DeepgramVoice.nexaVoice) {
         chain = primary.chain
         down = []
+        xaiVoice = xai
+        deepgramVoice = deepgram
     }
 
     /// Starts synthesizing at once; chunks are buffered until read.
@@ -44,7 +49,7 @@ final class VoiceChain {
     private func attempt(_ choice: VoiceChoice, _ text: String,
                          into continuation: AsyncThrowingStream<[Float], Error>.Continuation) async -> String? {
         let state = AttemptState()
-        let source = Self.source(choice, text)
+        let source = Self.source(choice, text, xai: xaiVoice, deepgram: deepgramVoice)
         let run = Task { @MainActor () -> String? in
             do {
                 for try await chunk in source {
@@ -86,10 +91,11 @@ final class VoiceChain {
     }
 
     /// One voice on its own, without fallback (Check connection tests each one).
-    static func source(_ choice: VoiceChoice, _ text: String) -> AsyncThrowingStream<[Float], Error> {
+    static func source(_ choice: VoiceChoice, _ text: String, xai: String = XAIVoice.nexaVoice,
+                       deepgram: String = DeepgramVoice.nexaVoice) -> AsyncThrowingStream<[Float], Error> {
         switch choice {
-        case .xai: return XAIVoice.stream(text)
-        case .deepgram: return DeepgramVoice.stream(text)
+        case .xai: return XAIVoice.stream(text, voice: xai)
+        case .deepgram: return DeepgramVoice.stream(text, voice: deepgram)
         case .iphone: return DeviceVoice.stream(text)
         }
     }

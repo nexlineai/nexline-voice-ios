@@ -41,6 +41,11 @@ targets:
         UIBackgroundModes: [audio]
         NSMicrophoneUsageDescription: Nexline Voice listens so you can talk to your agents.
         NSSpeechRecognitionUsageDescription: Nexline Voice turns your speech into text on the device.
+        NSCameraUsageDescription: Take a photo to show an agent.
+        # The RN app's links (Siri shortcuts made for it keep working): nexlinevoice://voice/nexa
+        CFBundleURLTypes:
+          - CFBundleURLName: com.nexlineai.voice
+            CFBundleURLSchemes: [nexlinevoice]
         # HTTPS only, so the export questionnaire is skipped on every upload.
         ITSAppUsesNonExemptEncryption: false
     settings:

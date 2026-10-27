@@ -74,11 +74,14 @@ final class NexaClient: NSObject, URLSessionTaskDelegate {
     }
 
     /// Sends one user turn and streams Nexa's reply events. Cancelling the consuming task closes the request.
-    func chat(_ text: String) -> AsyncThrowingStream<ChatStreamParser.Event, Error> {
+    /// `image` is a JPEG data URI sent with this turn only (serve.py hands it to her vision model).
+    func chat(_ text: String, image: String? = nil) -> AsyncThrowingStream<ChatStreamParser.Event, Error> {
         AsyncThrowingStream { continuation in
             let worker = Task {
                 do {
-                    var request = try self.jsonRequest("chat", body: ["text": text, "client": "phone"])
+                    var body: [String: Any] = ["text": text, "client": "phone"]
+                    if let image { body["image"] = image }
+                    var request = try self.jsonRequest("chat", body: body)
                     request.timeoutInterval = 120
                     let (bytes, response) = try await self.session.bytes(for: request)
                     try Self.check(response, body: "")
@@ -167,6 +170,58 @@ final class NexaClient: NSObject, URLSessionTaskDelegate {
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(code) else { throw NexaError.http(code, "") }
         return data
+    }
+
+    /// The Access headers, for players that fetch from serve.py themselves (the in-chat mix player).
+    func accessHeaders() -> [String: String]? {
+        guard let id = Keychain.get(.nexaClientID), let secret = Keychain.get(.nexaClientSecret) else { return nil }
+        return ["CF-Access-Client-Id": id, "CF-Access-Client-Secret": secret]
+    }
+
+    /// A GET on serve.py (Home Assistant states, camera frames). `query` is appended as is.
+    func get(_ path: String, query: [URLQueryItem] = [], range: String? = nil,
+             timeout: TimeInterval = 15) async throws -> (Data, Int) {
+        var request = try request(path)
+        request.url = url(path, query: query)
+        if let range { request.setValue(range, forHTTPHeaderField: "Range") }
+        request.timeoutInterval = timeout
+        let (data, response) = try await session.data(for: request)
+        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if (300..<400).contains(code) || code == 401 || code == 403 { throw NexaError.rejected(code) }
+        return (data, code)
+    }
+
+    /// serve.py's address for `path`. Values are encoded by hand: URLComponents leaves "&", "=" and "+" alone,
+    /// which breaks a URL passed as a value.
+    func url(_ path: String, query: [URLQueryItem] = []) -> URL {
+        let plain = Self.base.appendingPathComponent(path)
+        guard !query.isEmpty, var components = URLComponents(url: plain, resolvingAgainstBaseURL: false) else { return plain }
+        components.percentEncodedQueryItems = query.map {
+            URLQueryItem(name: $0.name, value: $0.value?.addingPercentEncoding(withAllowedCharacters: Self.unreserved))
+        }
+        return components.url ?? plain
+    }
+
+    /// The status of a GET without downloading the body (the mix proxy answers 503 while it is still caching).
+    func status(_ path: String, query: [URLQueryItem] = [], range: String? = nil) async -> Int {
+        guard var request = try? request(path) else { return 0 }
+        request.url = url(path, query: query)
+        if let range { request.setValue(range, forHTTPHeaderField: "Range") }
+        request.timeoutInterval = 30
+        guard let result = try? await session.bytes(for: request) else { return 0 }
+        result.0.task.cancel()
+        return (result.1 as? HTTPURLResponse)?.statusCode ?? 0
+    }
+
+    static let unreserved = CharacterSet(charactersIn:
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+
+    /// A POST with a JSON body on serve.py (Home Assistant switches, clearing the history).
+    func post(_ path: String, json: [String: Any] = [:]) async throws {
+        var request = try jsonRequest(path, body: json)
+        request.timeoutInterval = 15
+        let (data, response) = try await session.data(for: request)
+        try Self.check(response, body: String(decoding: data, as: UTF8.self))
     }
 
     /// Tells serve.py what the user actually heard before cutting in, so history keeps only that.
