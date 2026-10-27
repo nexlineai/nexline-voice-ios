@@ -2,7 +2,7 @@ import AVFoundation
 import Foundation
 import NexlineAudio
 
-/// Speaks with the chosen voice and falls back on its own: xAI → Edge → the iPhone's voice.
+/// Speaks with the chosen voice and falls back on its own: xAI → Deepgram → the iPhone's voice.
 ///
 /// A voice that fails before its first audio (error, missing key, or no audio within its deadline) hands the
 /// same piece to the next one and is skipped for the rest of the session, so later sentences don't pay the
@@ -75,12 +75,12 @@ final class VoiceChain {
         return failure
     }
 
-    /// How long a voice may take to its first audio. xAI is ~1.1 s and Edge sends a whole sentence at once;
-    /// the iPhone voice is on-device but slow to load the first time.
+    /// How long a voice may take to its first audio. xAI is ~1.1 s; Deepgram measured 2.5 s and more on the
+    /// kiosk (16 Oct); the iPhone voice is on-device but slow to load the first time.
     private static func deadline(_ choice: VoiceChoice) -> Double {
         switch choice {
         case .xai: return 4
-        case .edge: return 6
+        case .deepgram: return 6
         case .iphone: return 10
         }
     }
@@ -89,7 +89,7 @@ final class VoiceChain {
     static func source(_ choice: VoiceChoice, _ text: String) -> AsyncThrowingStream<[Float], Error> {
         switch choice {
         case .xai: return XAIVoice.stream(text)
-        case .edge: return EdgeVoice.stream(text)
+        case .deepgram: return DeepgramVoice.stream(text)
         case .iphone: return DeviceVoice.stream(text)
         }
     }

@@ -33,10 +33,11 @@ Plan, decisions and the feature cut-list are in the vault:
   `NexaClient` = serve.py `/chat` on `nexa.nexline.ai` with a Cloudflare Access service token (redirects disabled:
   a rejected token is a 302 to the login page; `/watchdog/version` answers `{"version": N}`). `Keychain` holds the
   keys; only Nexa's token is required, the others have fallbacks. `Settings` = Zé's choices (UserDefaults).
-- Speaking: `VoiceChain` = the chosen voice, then xAI → Edge → iPhone. A voice that fails before its first audio
+- Speaking: `VoiceChain` = the chosen voice, then xAI → Deepgram → iPhone. A voice that fails before its first audio
   (error, no key, deadline) hands the same piece on and is skipped for the session; one that fails mid-sentence is
-  not replaced. `XAIVoice` (streaming, `ara`), `EdgeVoice` (free, MP3 per piece, decoded via a temp file),
-  `DeviceVoice` (SpeechClip; whether `write()` is safe while the voice-processing engine runs is unproven).
+  not replaced. `XAIVoice` (streaming, `ara`), `DeepgramVoice` (Aura-2 Thalia,
+  Speak + Flush per piece), `DeviceVoice` (SpeechClip; build 8 showed `write()` is safe while the voice-processing
+  engine runs). Edge was dropped (27 Oct): Microsoft's read-aloud now wants a Sec-MS-GEC v2 token (403 with v1).
 - Listening: `MicRouter` hands mic buffers to `DeepgramListener` (Nova-3 streaming, keyterms, `speech_final` /
   `UtteranceEnd` end the turn via `Endpointer.speechEnded`) or `Listener` (iOS 26 SpeechAnalyzer, on-device).
   Deepgram failing at start or mid-session switches to `Listener`. Deepgram results carry their audio end time;

@@ -131,7 +131,7 @@ private struct SettingsView: View {
                 Section {
                     SecureField("Deepgram API key", text: $deepgramKey)
                 } header: {
-                    Text("Deepgram: listening")
+                    Text("Deepgram: listening and backup voice")
                 } footer: {
                     Text(status(.deepgramKey))
                 }

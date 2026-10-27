@@ -209,7 +209,7 @@ final class DeepgramListener: @unchecked Sendable {
     }
 }
 
-/// A one-shot flag an AVAudioConverter input block can set (the block may be `@Sendable`).
-final class OneShot: @unchecked Sendable {
+/// A one-shot flag the converter's input block can set (the block may be `@Sendable`).
+private final class OneShot: @unchecked Sendable {
     var used = false
 }

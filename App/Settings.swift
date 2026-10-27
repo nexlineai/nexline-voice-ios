@@ -2,7 +2,7 @@ import Foundation
 
 /// Who speaks Nexa's replies. The chosen one goes first; when it fails, the next ones in `fallbacks` take over.
 enum VoiceChoice: String, CaseIterable, Identifiable {
-    case xai, edge, iphone
+    case xai, deepgram, iphone
 
     static let storageKey = "voice"
     var id: String { rawValue }
@@ -10,7 +10,7 @@ enum VoiceChoice: String, CaseIterable, Identifiable {
     var label: String {
         switch self {
         case .xai: return "xAI (Ara)"
-        case .edge: return "Edge (Ava)"
+        case .deepgram: return "Deepgram (Thalia)"
         case .iphone: return "iPhone voice"
         }
     }
@@ -19,7 +19,7 @@ enum VoiceChoice: String, CaseIterable, Identifiable {
     var name: String {
         switch self {
         case .xai: return "xAI"
-        case .edge: return "Edge"
+        case .deepgram: return "Deepgram"
         case .iphone: return "iPhone"
         }
     }
@@ -27,7 +27,7 @@ enum VoiceChoice: String, CaseIterable, Identifiable {
     /// The chosen voice first, then the others in fallback order. The iPhone voice needs no network, so it is
     /// last unless chosen.
     var chain: [VoiceChoice] {
-        [self] + [VoiceChoice.xai, .edge, .iphone].filter { $0 != self }
+        [self] + [VoiceChoice.xai, .deepgram, .iphone].filter { $0 != self }
     }
 
     static var current: VoiceChoice {
