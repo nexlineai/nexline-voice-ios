@@ -63,8 +63,10 @@ struct MessageBubble: View {
     }
 
     private func meta(_ who: String) -> String {
-        guard let time = line.time else { return who }
-        return "\(who) · \(time.formatted(date: .omitted, time: .shortened))"
+        var text = who
+        if let time = line.time { text += " · \(time.formatted(date: .omitted, time: .shortened))" }
+        if line.text.contains(ReplyBlocks.cutMarker) { text += " · cut off" }
+        return text
     }
 }
 

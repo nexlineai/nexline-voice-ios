@@ -63,9 +63,12 @@ public enum ReplyBlocks {
     /// their text (`(?!\()`), [ha:…] markers have a colon, and [Face ID] starts with a capital.
     static let expressionTag = #"\[[a-z][a-z]*(?:[ ,]+[a-z]+){0,3}\](?!\()"#
 
+    /// serve.py's note in the history where the user talked over her. Shown as "…", not as words.
+    public static let cutMarker = "[the user cut this reply off here]"
+
     public static func parse(_ text: String) -> [ReplyBlock] {
         var blocks: [ReplyBlock] = []
-        let lines = text.components(separatedBy: "\n")
+        let lines = text.replacingOccurrences(of: cutMarker, with: "…").components(separatedBy: "\n")
         var i = 0
         while i < lines.count {
             let line = lines[i]
@@ -170,7 +173,7 @@ public struct AppLink: Equatable, Sendable {
     public let query: String?
 
     static let targets: [(key: String, label: String)] = [
-        ("youtube", "YouTube"), ("spotify", "Spotify"), ("maps", "Maps"), ("waze", "Waze"),
+        ("youtube", "YouTube"), ("spotify", "Spotify"), ("maps", "Google Maps"), ("waze", "Waze"),
         ("soundcloud", "SoundCloud"), ("mixcloud", "Mixcloud"), ("whatsapp", "WhatsApp"), ("chrome", "Chrome"),
         ("safari", "Browser"),
     ]
@@ -197,7 +200,8 @@ public struct AppLink: Equatable, Sendable {
         switch key {
         case "youtube": return URL(string: q.map { "youtube://results?search_query=\($0)" } ?? "youtube://")
         case "spotify": return URL(string: q.map { "spotify:search:\($0)" } ?? "spotify://")
-        case "maps": return URL(string: q.map { "maps://?q=\($0)" } ?? "maps://")
+        // Google Maps, not Apple's (Zé, 27 Oct: "maps://" opened Apple Maps). A place is where he wants to go.
+        case "maps": return URL(string: q.map { "comgooglemaps://?daddr=\($0)&directionsmode=driving" } ?? "comgooglemaps://")
         case "waze": return URL(string: q.map { "waze://?q=\($0)&navigate=yes" } ?? "waze://")
         case "soundcloud": return URL(string: q.map { "soundcloud://search?q=\($0)" } ?? "soundcloud://")
         case "mixcloud": return URL(string: "mixcloud://")
@@ -212,7 +216,8 @@ public struct AppLink: Equatable, Sendable {
         switch key {
         case "youtube": return URL(string: q.map { "https://www.youtube.com/results?search_query=\($0)" } ?? "https://www.youtube.com")
         case "spotify": return URL(string: q.map { "https://open.spotify.com/search/\($0)" } ?? "https://open.spotify.com")
-        case "maps": return q.flatMap { URL(string: "https://maps.apple.com/?q=\($0)") }
+        case "maps": return URL(string: q.map { "https://www.google.com/maps/dir/?api=1&destination=\($0)" }
+            ?? "https://www.google.com/maps")
         case "waze": return q.flatMap { URL(string: "https://waze.com/ul?q=\($0)") }
         case "soundcloud": return URL(string: q.map { "https://soundcloud.com/search?q=\($0)" } ?? "https://soundcloud.com")
         case "mixcloud": return URL(string: q.map { "https://www.mixcloud.com/search/?q=\($0)" } ?? "https://www.mixcloud.com")

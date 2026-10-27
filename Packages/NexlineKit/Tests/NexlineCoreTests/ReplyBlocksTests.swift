@@ -19,6 +19,17 @@ final class ReplyBlocksTests: XCTestCase {
         XCTAssertNil(AppLink.parse("Say OPEN:youtube"))
     }
 
+    func testMapsOpensGoogleMapsWithDirections() {
+        let link = AppLink.parse("OPEN:maps:Sintra")
+        XCTAssertEqual(link?.label, "Google Maps")
+        XCTAssertEqual(link?.appURL?.absoluteString, "comgooglemaps://?daddr=Sintra&directionsmode=driving")
+        XCTAssertEqual(link?.webURL?.absoluteString, "https://www.google.com/maps/dir/?api=1&destination=Sintra")
+    }
+
+    func testCutMarkerShowsAsEllipsis() {
+        XCTAssertEqual(ReplyBlocks.parse("One. Two. Three. [the user cut this reply off here]"), [.line("One. Two. Three. …")])
+    }
+
     func testChromeTakesTheURLWithoutItsScheme() {
         XCTAssertEqual(AppLink.parse("OPEN:chrome:https://grooveline.org/live")?.appURL?.absoluteString,
                        "googlechromes://grooveline.org/live")
