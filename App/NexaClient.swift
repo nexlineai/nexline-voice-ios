@@ -64,9 +64,11 @@ final class NexaClient: NSObject, URLSessionTaskDelegate {
         let text = String(decoding: data, as: UTF8.self)
         try Self.check(response, body: text)
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let seq = (object["hseq"] ?? object["hlen"]) as? Int
-        else { throw NexaError.notJSON(code, String(text.prefix(80))) }
+        // serve.py answers `{"version": N}` here (hseq/hlen in newer builds). Any JSON object proves it got past Access.
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw NexaError.notJSON(code, String(text.prefix(80)))
+        }
+        let seq = (object["hseq"] ?? object["hlen"] ?? object["version"]).map { "\($0)" } ?? "?"
         return "serve.py answers, history at \(seq)"
     }
 
