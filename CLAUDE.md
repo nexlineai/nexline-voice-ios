@@ -22,14 +22,23 @@ Plan, decisions and the feature cut-list are in the vault:
   `MARKETING_VERSION` (`v0.1.0`, or `v0.1.0-2` for another build of it).
 
 ## Architecture
-- `NexlineCore` (pure Swift, tested): `Level`, `LevelStats`, `BargeInDetector`.
+- `NexlineCore` (pure Swift, tested on the CI host): `Level`, `LevelStats`, `BargeInDetector`, `Endpointer`
+  (end of turn from recognizer results), `SpeechText` (what the voice says, pause tags as silence),
+  `SentenceFlusher`, `HeardTimeline` (what the user heard before cutting in), `ChatStreamParser` (serve.py SSE),
+  `PCM16Decoder` (xAI audio). Ports of the RN app's `tts.ts`/`llm.ts` logic; keep them tested.
 - `NexlineAudio` (iOS only): `VoiceEngine` = one AVAudioEngine with voice processing for the mic and the
-  player, so the bot can be interrupted without hearing itself. `SpeechClip` renders on-device speech
-  (unused since build 3; the spike plays the bundled espeak-ng `App/test-clip.wav`).
+  player, so the bot can be interrupted without hearing itself. `SpeechClip` is unused (kept for an
+  on-device fallback voice).
+- App: `TalkModel` runs the conversation (listen → Nexa → speak → listen, cut-in on the barge-in detector).
+  `Listener` = iOS 26 SpeechAnalyzer/SpeechTranscriber fed from the engine's mic tap. `NexaClient` = serve.py
+  `/chat` on `nexa.nexline.ai` with a Cloudflare Access service token (redirects disabled: a rejected token is a
+  302 to the login page). `XAIVoice` = xAI streaming TTS, voice `ara`. `Keychain` holds the three keys.
 - Enabling voice processing changes the IO formats while the engine is set up, so the engine starts with a
-  configuration change pending and stops itself right away (builds 1-3). Rebuilding the engine re-enables voice
-  processing and loops. Fixed in build 4: resume the same engine (reinstall the tap, prepare, start; no session or
-  voice-processing calls). All four session setups then stay up with mic data. Never answer a configuration change
-  with a new engine. Evidence is in the vault note.
-- Playback format is 24 kHz mono float, the format xAI streams.
+  configuration change pending and stops itself right away (spike builds 1-3). Fixed in build 4: resume the same
+  engine (reinstall the tap, prepare, start; no session or voice-processing calls). Never answer a configuration
+  change with a new engine. Each start costs one resume, so the resume cap resets on every start.
+  The spike app is tagged `spike-audio-build4`. Evidence is in the vault note.
+- While Nexa thinks or speaks, recognizer text is ignored (it may be her echo); a turn only counts if the mic
+  heard the user above the line, which stops a self-talk loop.
+- Playback format is 24 kHz mono float; xAI streams 24 kHz 16-bit PCM, decoded to float.
 - Logs use subsystem `com.nexlineai.voice`; read them on Omarchy with `idevicesyslog` over USB.

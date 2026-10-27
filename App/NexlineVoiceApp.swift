@@ -4,7 +4,7 @@ import SwiftUI
 struct NexlineVoiceApp: App {
     var body: some Scene {
         WindowGroup {
-            SpikeView()
+            TalkView()
                 .preferredColorScheme(.dark)
         }
     }

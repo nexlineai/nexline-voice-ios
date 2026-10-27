@@ -52,6 +52,9 @@ public final class VoiceEngine {
 
     /// Called on the audio thread for every mic block. Set before `start`.
     public var onMicBlock: (@Sendable (MicBlock) -> Void)?
+    /// Called on the audio thread with every mic buffer (echo-cancelled when voice processing is on),
+    /// for speech recognition. The buffer is only valid during the call. Set before `start`.
+    public var onMicBuffer: ((AVAudioPCMBuffer) -> Void)?
     /// Engine messages worth showing in a log.
     public var onEvent: (@Sendable (String) -> Void)?
 
@@ -137,6 +140,23 @@ public final class VoiceEngine {
         player.play()
     }
 
+    /// Queues mono samples in `playbackFormat` after whatever is already queued, for audio that streams
+    /// in (TTS). Returns their duration in seconds, 0 when nothing was queued.
+    @discardableResult
+    public func enqueue(_ samples: [Float]) -> Double {
+        guard isRunning, !samples.isEmpty,
+              let buffer = AVAudioPCMBuffer(pcmFormat: Self.playbackFormat,
+                                            frameCapacity: AVAudioFrameCount(samples.count)),
+              let channel = buffer.floatChannelData?[0]
+        else { return 0 }
+        buffer.frameLength = AVAudioFrameCount(samples.count)
+        samples.withUnsafeBufferPointer { channel.update(from: $0.baseAddress!, count: samples.count) }
+        player.scheduleBuffer(buffer)
+        if !player.isPlaying { player.play() }
+        return Double(samples.count) / Self.playbackFormat.sampleRate
+    }
+
+    /// Stops playback and drops everything queued.
     public func stopPlayback() {
         player.stop()
     }
@@ -154,12 +174,14 @@ public final class VoiceEngine {
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else { throw EngineError.noMicrophone }
         let sink = onMicBlock
+        let bufferSink = onMicBuffer
         let rate = format.sampleRate
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
             guard let channels = buffer.floatChannelData else { return }
             let frames = Int(buffer.frameLength)
             let db = Level.rmsDB(UnsafeBufferPointer(start: channels[0], count: frames))
             sink?(MicBlock(levelDB: db, durationMs: Double(frames) / rate * 1000))
+            bufferSink?(buffer)
         }
     }
 
