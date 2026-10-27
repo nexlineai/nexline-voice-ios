@@ -299,6 +299,9 @@ final class TalkModel: ObservableObject {
                         if let piece = flusher.take(full, final: false) { self.speak(piece, gen) }
                     case .tool(let label, let status):
                         self.note("tool: \(label) \(status)")
+                        // "Let me check." has no space after it until the tools finish, so speak it now
+                        // instead of seconds later (build 9: first audio 8 s after first text).
+                        if let piece = flusher.take(reply, final: true) { self.speak(piece, gen) }
                     case .done:
                         break
                     }

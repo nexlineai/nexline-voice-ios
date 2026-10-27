@@ -26,6 +26,15 @@ final class SpeechTextTests: XCTestCase {
 }
 
 final class SentenceFlusherTests: XCTestCase {
+    func testFlushBeforeAToolThenCarryOn() {
+        var f = SentenceFlusher()
+        XCTAssertNil(f.take("Let me find those.", final: false))
+        XCTAssertEqual(f.take("Let me find those.", final: true), "Let me find those.")
+        XCTAssertNil(f.take("Let me find those.", final: true))
+        XCTAssertEqual(f.take("Let me find those.Mood lights are on, purple. The", final: false),
+                       "Mood lights are on, purple. ")
+    }
+
     func testFirstPieceFlushesEarlyThenWholeSentences() {
         var f = SentenceFlusher()
         XCTAssertEqual(f.take("Sure, I can help with that", final: false), "Sure, ")
