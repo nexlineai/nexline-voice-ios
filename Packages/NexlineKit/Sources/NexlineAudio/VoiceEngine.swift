@@ -89,6 +89,8 @@ public final class VoiceEngine {
         stop()
         guard setup != nil else { throw EngineError.sessionNotConfigured }
         self.voiceProcessing = voiceProcessing
+        // Every start costs one expected resume; the cap only counts resumes after that.
+        recentResumes = []
 
         engine = AVAudioEngine()
         player = AVAudioPlayerNode()
