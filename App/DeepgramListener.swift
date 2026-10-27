@@ -20,7 +20,7 @@ final class DeepgramListener: @unchecked Sendable {
     }
 
     static let keyterms = ["Nexa", "Carapava", "Cara Pava", "Mamadona", "Grooveline", "Nexline", "Streamline",
-                           "Mixcloud", "SoundCloud", "YouTube", "Spotify", "Google Maps"]
+                           "Mixcloud", "SoundCloud", "YouTube", "Spotify", "Google Maps", "ZDB"]
     private static let format = AVAudioFormat(
         commonFormat: .pcmFormatInt16, sampleRate: 16_000, channels: 1, interleaved: true)!
 
