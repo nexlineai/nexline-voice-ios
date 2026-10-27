@@ -37,11 +37,21 @@ final class SentenceFlusherTests: XCTestCase {
 
     func testFirstPieceFlushesEarlyThenWholeSentences() {
         var f = SentenceFlusher()
-        XCTAssertEqual(f.take("Sure, I can help with that", final: false), "Sure, ")
-        XCTAssertNil(f.take("Sure, I can help with that", final: false))
-        XCTAssertEqual(f.take("Sure, I can help with that. Next", final: false), "I can help with that. ")
-        XCTAssertEqual(f.take("Sure, I can help with that. Next thing", final: true), "Next thing")
-        XCTAssertNil(f.take("Sure, I can help with that. Next thing", final: true))
+        XCTAssertEqual(f.take("Sure thing, I can help with that", final: false), "Sure thing, ")
+        XCTAssertNil(f.take("Sure thing, I can help with that", final: false))
+        XCTAssertEqual(f.take("Sure thing, I can help with that. Next", final: false), "I can help with that. ")
+        XCTAssertEqual(f.take("Sure thing, I can help with that. Next thing", final: true), "Next thing")
+        XCTAssertNil(f.take("Sure thing, I can help with that. Next thing", final: true))
+    }
+
+    /// Build 15: "Here," alone, then a second of silence while the rest synthesized.
+    func testFirstPieceIsNeverALoneWord() {
+        var f = SentenceFlusher()
+        XCTAssertNil(f.take("Here, what do", final: false))
+        XCTAssertNil(f.take("Sure. Playing", final: false))
+        XCTAssertEqual(f.take("Here, what do you want? I", final: false), "Here, what do you want? ")
+        var g = SentenceFlusher()
+        XCTAssertEqual(g.take("Done.", final: true), "Done.")
     }
 
     func testNeverCutsInsideATag() {

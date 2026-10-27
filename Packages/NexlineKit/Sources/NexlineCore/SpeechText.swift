@@ -74,7 +74,12 @@ public enum SpeechText {
 /// The first piece flushes at the earliest soft boundary (comma, colon, dash) or after ~50 characters, so
 /// the voice starts early; later pieces wait for sentence ends. A cut never lands inside an open `[tag]`,
 /// because a torn tag reaches xAI as text and gets read out.
+///
+/// The first piece is at least `minFirstPiece` characters: a lone "Here," played in 0.4 s and then left a
+/// second of silence while the rest synthesized (build 15).
 public struct SentenceFlusher: Sendable {
+    public static let minFirstPiece = 10
+
     /// UTF-16 offset into the reply of what was already handed out (the RN app's JS indices).
     private var spokenLength = 0
     private var spokenAny = false
@@ -94,8 +99,13 @@ public struct SentenceFlusher: Sendable {
         if final {
             lastEnd = pending.length
         } else if !spokenAny {
-            for end in Self.ends(Self.soft, pending) where Self.cutIsSafe(pending, end) { lastEnd = end }
-            for end in Self.ends(Self.hard, pending) where Self.cutIsSafe(pending, end) { lastEnd = max(lastEnd, end) }
+            let long = { (end: Int) in
+                pending.substring(to: end).trimmingCharacters(in: .whitespaces).count >= Self.minFirstPiece
+            }
+            for end in Self.ends(Self.soft, pending) where long(end) && Self.cutIsSafe(pending, end) { lastEnd = end }
+            for end in Self.ends(Self.hard, pending) where long(end) && Self.cutIsSafe(pending, end) {
+                lastEnd = max(lastEnd, end)
+            }
             if lastEnd == 0 && pending.length >= 50 {
                 var space = pending.range(of: " ", options: .backwards).location
                 while space != NSNotFound && space > 20 && !Self.cutIsSafe(pending, space + 1) {

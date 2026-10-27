@@ -126,6 +126,10 @@ final class TalkModel: ObservableObject {
     private var replyOpen = false
     /// When everything queued so far finishes playing (uptime seconds).
     private var playbackEnd = 0.0
+    /// Echo cancellation settles on the first seconds of her voice after the engine starts or the route changes;
+    /// until then cut-ins need more (build 15 cut every first reply after one word). Set by the first audio.
+    private var settlingUntil: Double?
+    private static let settleSeconds = 3.5
     private var timeline = HeardTimeline()
     private var turnEndedAt = 0.0
     private var firstTextAt: Double?
@@ -434,6 +438,7 @@ final class TalkModel: ObservableObject {
             return
         }
         phase = .starting
+        settlingUntil = nil
         let botVoice = BotVoice.current(bot)
         let voice = botVoice.engine
         voices.reset(primary: voice, xai: botVoice.xai, deepgram: botVoice.deepgram)
@@ -522,13 +527,25 @@ final class TalkModel: ObservableObject {
     }
 
     private func micBlock(_ block: VoiceEngine.MicBlock) {
+        let now = Self.now
         let playing = self.playing
+        // The gaps between her pieces count as playing: the echo tail of a short first piece cut her off there.
+        let shielded = playing || phase == .speaking
+        let strict = settlingUntil.map { now < $0 } ?? false
         meter.db = block.levelDB
-        meter.threshold = detector.threshold(playing: playing)
+        meter.threshold = detector.threshold(playing: shielded, strict: strict)
         levels.micDB = muted ? Level.silenceDB : block.levelDB
-        if !playing && block.levelDB > detector.threshold(playing: false) { lastLoudAt = Self.now }
-        let speech = detector.process(levelDB: block.levelDB, durationMs: block.durationMs, playing: playing)
-        if speech && phase == .speaking && bargeInOn && !muted { cutIn() }
+        if !shielded && block.levelDB > detector.threshold(playing: false) { lastLoudAt = now }
+        let speech = detector.process(levelDB: block.levelDB, durationMs: block.durationMs, playing: shielded,
+                                      strict: strict)
+        if speech && phase == .speaking && bargeInOn && !muted {
+            let into = settlingUntil.map { now - ($0 - Self.settleSeconds) } ?? 0
+            note(String(format: "cut-in: mic %.0f dB over the %.0f dB line (floor %.0f), %@, %.1f s into her voice%@",
+                        block.levelDB, meter.threshold, detector.noiseFloorDB,
+                        playing ? "while she played" : "in a gap between pieces", into,
+                        strict ? ", echo cancellation settling" : ""))
+            cutIn()
+        }
     }
 
     private func recognized(_ text: String, isFinal: Bool, endsAt: Double?) {
@@ -701,6 +718,7 @@ final class TalkModel: ObservableObject {
         let seconds = engine.enqueue(samples)
         guard seconds > 0 else { return startAt }
         playbackEnd = startAt + seconds
+        if settlingUntil == nil { settlingUntil = startAt + Self.settleSeconds }
         levels.addSpeech(samples, start: startAt, seconds: seconds)
         if firstAudioAt == nil {
             firstAudioAt = now
@@ -862,7 +880,10 @@ final class TalkModel: ObservableObject {
             let route = AVAudioSession.sharedInstance().currentRoute
             let inputs = route.inputs.map(\.portName).joined(separator: ", ")
             let outputs = route.outputs.map(\.portName).joined(separator: ", ")
-            Task { @MainActor in self?.note("route: \(inputs) → \(outputs)") }
+            Task { @MainActor in
+                self?.note("route: \(inputs) → \(outputs)")
+                self?.settlingUntil = nil
+            }
         })
     }
 

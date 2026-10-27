@@ -70,5 +70,8 @@ Plan, decisions and the feature cut-list are in the vault:
   The spike app is tagged `spike-audio-build4`. Evidence is in the vault note.
 - While Nexa thinks or speaks, recognizer text is ignored (it may be her echo); a turn only counts if the mic
   heard the user above the line, which stops a self-talk loop.
+- Cut-in (build 16): the whole reply uses the playback line, including the silent gaps between pieces, and the
+  first 3.5 s of her voice after a start or route change are strict (+8 dB, 400 ms) while echo cancellation
+  settles. The first spoken piece is at least 10 characters. Every cut-in logs level, line, floor and gap/settling.
 - Playback format is 24 kHz mono float; xAI streams 24 kHz 16-bit PCM, decoded to float.
 - Logs use subsystem `com.nexlineai.voice`; read them on Omarchy with `idevicesyslog` over USB.

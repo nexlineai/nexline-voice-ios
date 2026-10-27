@@ -32,12 +32,13 @@ final class BargeInDetectorTests: XCTestCase {
     private let blockMs = 20.0
 
     /// Feeds `ms` of one level and returns when it triggered, in ms from the start of this call.
-    private func feed(_ detector: inout BargeInDetector, db: Float, ms: Double, playing: Bool = false) -> [Double] {
+    private func feed(_ detector: inout BargeInDetector, db: Float, ms: Double, playing: Bool = false,
+                      strict: Bool = false) -> [Double] {
         var hits: [Double] = []
         var t = 0.0
         while t < ms {
             t += blockMs
-            if detector.process(levelDB: db, durationMs: blockMs, playing: playing) { hits.append(t) }
+            if detector.process(levelDB: db, durationMs: blockMs, playing: playing, strict: strict) { hits.append(t) }
         }
         return hits
     }
@@ -79,5 +80,24 @@ final class BargeInDetectorTests: XCTestCase {
         XCTAssertEqual(d.noiseFloorDB, -35, accuracy: 0.01)
         XCTAssertEqual(feed(&d, db: -35, ms: 5000), [])
         XCTAssertEqual(feed(&d, db: -15, ms: 300), [160])   // speech over the new noise still counts
+    }
+
+    /// Build 15: her own first word leaked through before echo cancellation settled and cut her off.
+    func testStrictIgnoresAnEchoBurstThatNormalModeWouldTake() {
+        var normal = BargeInDetector()
+        _ = feed(&normal, db: -60, ms: 1000)
+        XCTAssertEqual(feed(&normal, db: -38, ms: 300, playing: true), [160])
+
+        var strict = BargeInDetector()
+        _ = feed(&strict, db: -60, ms: 1000)
+        XCTAssertEqual(feed(&strict, db: -38, ms: 300, playing: true, strict: true), [])
+    }
+
+    func testStrictStillHearsSustainedSpeech() {
+        var d = BargeInDetector()
+        _ = feed(&d, db: -60, ms: 1000)
+        XCTAssertEqual(feed(&d, db: -20, ms: 300, playing: true, strict: true), [])  // too short while settling
+        _ = feed(&d, db: -60, ms: 500)
+        XCTAssertEqual(feed(&d, db: -20, ms: 800, playing: true, strict: true), [400])
     }
 }
