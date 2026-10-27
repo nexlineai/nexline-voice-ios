@@ -1,9 +1,8 @@
 import SwiftUI
 import UIKit
 
-/// Home Assistant through serve.py on the Jetson (`/ha/*`, same Access token as Nexa). serve.py already fails
-/// over between the LAN and ha.nexline.ai, so this works at home and in the car. Names, units and kinds come
-/// from Home Assistant itself; nothing here knows a particular device.
+/// Home Assistant, directly with the house's address and token, or through the kiosk (`HAClient`). Names, units
+/// and kinds come from Home Assistant itself; nothing here knows a particular device.
 struct HAEntity: Identifiable, Equatable {
     let id: String
     var state: String
@@ -82,11 +81,8 @@ final class HomeStore: ObservableObject {
         guard force || Date().timeIntervalSince(lastLoad) > 4 else { return }
         lastLoad = Date()
         do {
-            let (data, code) = try await NexaClient.shared.get("ha/states")
-            guard code == 200,
-                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let states = json["states"] as? [[String: Any]]
-            else { throw URLError(.cannotParseResponse) }
+            guard HAClient.configured else { throw HAClient.HAError.notSet }
+            let states = try await HAClient.states()
             entities = states.compactMap(Self.entity)
             problem = nil
         } catch {
@@ -102,7 +98,7 @@ final class HomeStore: ObservableObject {
         entities[index].state = entities[index].isOn ? "off" : "on"
         busy.insert(id)
         do {
-            try await NexaClient.shared.post("ha/toggle", json: ["entity_id": id])
+            try await HAClient.toggle(id)
             try? await Task.sleep(for: .milliseconds(800))
             await refresh(force: true)
         } catch {
@@ -182,7 +178,7 @@ struct CameraFrame: View {
     private func poll() async {
         await HomeStore.shared.refresh()
         while !Task.isCancelled {
-            if let image = await CameraFrame.snapshot(entityID) {
+            if let image = await HAClient.snapshot(entityID) {
                 frame = image
                 trouble = false
                 try? await Task.sleep(for: .milliseconds(1200))
@@ -193,12 +189,6 @@ struct CameraFrame: View {
         }
     }
 
-    static func snapshot(_ entityID: String) async -> UIImage? {
-        let bust = URLQueryItem(name: "t", value: String(Int(Date().timeIntervalSince1970 * 1000)))
-        guard let result = try? await NexaClient.shared.get("ha/camera/\(entityID)", query: [bust], timeout: 12),
-              result.1 == 200 else { return nil }
-        return UIImage(data: result.0)
-    }
 }
 
 private struct LiveBadge: View {
@@ -255,7 +245,7 @@ private struct CameraFullScreen: View {
         }
         .task {
             while !Task.isCancelled {
-                if let image = await CameraFrame.snapshot(entityID) { frame = image }
+                if let image = await HAClient.snapshot(entityID) { frame = image }
                 try? await Task.sleep(for: .milliseconds(1000))
             }
         }

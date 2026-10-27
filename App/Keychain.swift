@@ -11,6 +11,7 @@ enum Keychain {
         case deepgramKey = "deepgram.api-key"
         case carapavaKey = "carapava.api-key"
         case mamadonaKey = "mamadona.api-key"
+        case haToken = "homeassistant.token"
     }
 
     private static let service = "com.nexlineai.voice"

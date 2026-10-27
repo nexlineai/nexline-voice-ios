@@ -42,6 +42,10 @@ targets:
         NSMicrophoneUsageDescription: Nexline Voice listens so you can talk to your agents.
         NSSpeechRecognitionUsageDescription: Nexline Voice turns your speech into text on the device.
         NSCameraUsageDescription: Take a photo to show an agent.
+        NSLocalNetworkUsageDescription: Reach Home Assistant on your home network.
+        # Plain http only to the local network (a house's Home Assistant by IP or .local), https everywhere else.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
         # The RN app's links (Siri shortcuts made for it keep working): nexlinevoice://voice/nexa
         CFBundleURLTypes:
           - CFBundleURLName: com.nexlineai.voice

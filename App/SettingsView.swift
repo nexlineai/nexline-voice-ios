@@ -14,6 +14,9 @@ struct SettingsView: View {
     @State private var expanded: Bot?
     @State private var keys: [Keychain.Key: String] = [:]
     @State private var confirmClearAll = false
+    @State private var haAddress = UserDefaults.standard.string(forKey: HAClient.urlKey) ?? ""
+    @State private var haStatus: String?
+    @State private var haTesting = false
     @State private var refresh = 0
 
     var body: some View {
@@ -69,6 +72,39 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    TextField("Address, like https://home.example.com", text: $haAddress)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    KeyField(title: "Long-lived access token", text: binding(.haToken))
+                    Button {
+                        haTesting = true
+                        Task {
+                            haStatus = await HAClient.test(address: haAddress, token: keys[.haToken])
+                            haTesting = false
+                        }
+                    } label: {
+                        HStack {
+                            Text("Test connection")
+                            Spacer()
+                            if haTesting { ProgressView() }
+                        }
+                    }
+                    .disabled(haTesting)
+                    if let haStatus {
+                        Text(haStatus)
+                            .font(.footnote)
+                            .foregroundStyle(haStatus.hasPrefix("Connected") ? Theme.teal : Theme.coral)
+                    }
+                } header: {
+                    Text("Home Assistant")
+                } footer: {
+                    Text("Token \(status(.haToken)). Create one on your Home Assistant profile page, under "
+                         + "Long-lived access tokens. Without an address and token, the app reaches Home Assistant "
+                         + "through the kiosk.")
+                }
+
+                Section {
                     KeyField(title: "xAI API key", text: binding(.xaiKey))
                     KeyField(title: "Deepgram API key", text: binding(.deepgramKey))
                 } header: {
@@ -103,6 +139,14 @@ struct SettingsView: View {
                         for (key, value) in keys where !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                             Keychain.set(key, value)
                         }
+                        let address = haAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if address.isEmpty {
+                            UserDefaults.standard.removeObject(forKey: HAClient.urlKey)
+                        } else {
+                            UserDefaults.standard.set(HAClient.normalized(address)?.absoluteString ?? address,
+                                                      forKey: HAClient.urlKey)
+                        }
+                        Task { await HomeStore.shared.refresh(force: true) }
                         talk.keysChanged()
                         dismiss()
                     }
