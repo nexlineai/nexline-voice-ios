@@ -38,6 +38,12 @@ Plan, decisions and the feature cut-list are in the vault:
   not replaced. `XAIVoice` (streaming, `ara`), `DeepgramVoice` (Aura-2 Thalia,
   Speak + Flush per piece), `DeviceVoice` (SpeechClip; build 8 showed `write()` is safe while the voice-processing
   engine runs). Edge was dropped (27 Oct): Microsoft's read-aloud now wants a Sec-MS-GEC v2 token (403 with v1).
+- Conversation: `TalkModel` keeps the shared serve.py history (`GET /history`, every 4 s while on screen, never
+  during a turn, not with fewer messages than shown right after one). Typed messages are turns too: with voice
+  on they cut in and get spoken, with voice off the reply is text only. `ReplyBlocks` (NexlineCore) is the RN
+  `parseBlocks` port: lines, code, images (`/media/` made absolute, loaded with the token by `NexaClient`),
+  media cards, `OPEN:` app links (`AppLauncher`: app scheme, then web; voice mode opens once after the reply
+  ends), camera and HA markers. Parity with the RN app is the default (Zé, 27 Oct): its `src/` is the spec.
 - Listening: `MicRouter` hands mic buffers to `DeepgramListener` (Nova-3 streaming, keyterms, `speech_final` /
   `UtteranceEnd` end the turn via `Endpointer.speechEnded`) or `Listener` (iOS 26 SpeechAnalyzer, on-device).
   Deepgram failing at start or mid-session switches to `Listener`. Deepgram results carry their audio end time;

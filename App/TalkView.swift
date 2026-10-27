@@ -3,48 +3,121 @@ import SwiftUI
 
 struct TalkView: View {
     @StateObject private var model = TalkModel()
+    @Environment(\.scenePhase) private var scenePhase
     @State private var showSettings = false
+    @State private var showLog = false
+    @State private var draft = ""
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                ConversationList(lines: model.lines)
+                Divider()
+                VStack(spacing: 10) {
+                    if model.phase != .off {
+                        HStack(spacing: 10) {
+                            Text(model.phase.rawValue).font(.headline)
+                            MeterRow(meter: model.meter)
+                        }
+                        if !model.hearing.isEmpty {
+                            Text(model.hearing)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .lineLimit(3)
+                        }
+                    }
+                    HStack(alignment: .bottom, spacing: 10) {
+                        TextField(model.keysSet ? "Message Nexa" : "Add Nexa's token in Settings", text: $draft)
+                            .textFieldStyle(.roundedBorder)
+                            .submitLabel(.send)
+                            .onSubmit(sendDraft)
+                            .disabled(!model.keysSet)
+                        Button(action: sendDraft) {
+                            Image(systemName: model.typing ? "ellipsis.circle" : "arrow.up.circle.fill").font(.title)
+                        }
+                        .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !model.keysSet)
+                        Button {
+                            Task { await model.toggle() }
+                        } label: {
+                            Image(systemName: model.phase == .off ? "mic.circle.fill" : "stop.circle.fill")
+                                .font(.largeTitle)
+                                .foregroundStyle(model.phase == .off ? Color.accentColor : Color.red)
+                        }
+                        .disabled(model.phase == .starting || model.checking || (model.phase == .off && !model.keysSet))
+                    }
+                }
+                .padding(12)
+            }
+            .navigationTitle("Nexa")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Log") { showLog = true }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Settings") { showSettings = true }
+                        .disabled(model.phase != .off)
+                }
+            }
+            .sheet(isPresented: $showSettings, onDismiss: { model.keysChanged() }) {
+                SettingsView()
+            }
+            .sheet(isPresented: $showLog) {
+                LogView(model: model)
+            }
+        }
+        .onAppear { model.startSync() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { model.startSync() } else { model.stopSync() }
+        }
+    }
+
+    private func sendDraft() {
+        let text = draft
+        draft = ""
+        model.sendTyped(text)
+    }
+}
+
+/// The shared conversation, newest at the bottom, following new text as it streams in.
+private struct ConversationList: View {
+    let lines: [TalkModel.Line]
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    if lines.isEmpty {
+                        Text("Talk or type. Nexa's conversation with the kiosk shows up here.")
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 40)
+                            .frame(maxWidth: .infinity)
+                    }
+                    ForEach(lines) { line in
+                        MessageRow(line: line).id(line.id)
+                    }
+                    Color.clear.frame(height: 1).id("bottom")
+                }
+                .padding(12)
+            }
+            .scrollDismissesKeyboard(.interactively)
+            .onChange(of: lines.last?.text) { _, _ in
+                withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
+            }
+            .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
+        }
+    }
+}
+
+/// Check connection, Copy log and the log itself (what Zé pastes back).
+private struct LogView: View {
+    @ObservedObject var model: TalkModel
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             List {
-                Section {
-                    VStack(spacing: 14) {
-                        Text(model.phase.rawValue)
-                            .font(.largeTitle.bold())
-                        if !model.hearing.isEmpty {
-                            Text(model.hearing)
-                                .foregroundStyle(.secondary)
-                                .multilineTextAlignment(.center)
-                        }
-                        MeterRow(meter: model.meter)
-                        Button(model.phase == .off ? "Start talking" : "Stop") {
-                            Task { await model.toggle() }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(model.phase == .starting || model.checking || (model.phase == .off && !model.keysSet))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
-                } footer: {
-                    Text(model.keysSet
-                         ? "Talk, pause, and Nexa answers. Talk over her to cut in."
-                         : "Add Nexa's token first (Settings, top right).")
-                }
-
-                if !model.lines.isEmpty {
-                    Section("Conversation") {
-                        ForEach(model.lines) { line in
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(line.fromUser ? "You" : "Nexa")
-                                    .font(.caption.bold())
-                                    .foregroundStyle(line.fromUser ? Color.secondary : Color.accentColor)
-                                Text(line.text.isEmpty ? "…" : line.text)
-                            }
-                        }
-                    }
-                }
-
                 Section {
                     Button("Check connection") { Task { await model.checkConnection() } }
                         .disabled(model.phase != .off || model.checking || !model.keysSet)
@@ -55,20 +128,18 @@ struct TalkView: View {
                     Text("Checks Nexa's token and the Deepgram key, then each voice says one sentence. "
                          + "It doesn't talk to Nexa, so nothing shows up on the kiosk.")
                 }
-
                 Section("Log") {
                     ForEach(model.log.reversed()) { line in
                         Text(line.text).font(.caption.monospaced())
                     }
                 }
             }
-            .navigationTitle("Nexa")
+            .navigationTitle("Log")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                Button("Settings") { showSettings = true }
-                    .disabled(model.phase != .off)
-            }
-            .sheet(isPresented: $showSettings, onDismiss: { model.keysChanged() }) {
-                SettingsView()
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
             }
         }
     }
@@ -80,6 +151,7 @@ private struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage(VoiceChoice.storageKey) private var voice = VoiceChoice.xai
     @AppStorage(EarsChoice.storageKey) private var ears = EarsChoice.deepgram
+    @AppStorage(AppLauncher.settingKey) private var appLaunch = true
     @State private var clientID = ""
     @State private var clientSecret = ""
     @State private var xaiKey = ""
@@ -107,6 +179,12 @@ private struct SettingsView: View {
                     Text("Nexa listens with")
                 } footer: {
                     Text(ears == .deepgram ? "If it fails: the iPhone." : "On the iPhone, works offline.")
+                }
+
+                Section {
+                    Toggle("Open apps from Nexa's replies", isOn: $appLaunch)
+                } footer: {
+                    Text("In voice mode, \"play X on YouTube\" opens YouTube by itself. In typed chat it's a card you tap.")
                 }
 
                 Section {

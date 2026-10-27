@@ -21,6 +21,7 @@ final class NexaClient: NSObject, URLSessionTaskDelegate {
     }
 
     static let base = URL(string: "https://nexa.nexline.ai")!
+    static let shared = NexaClient()
 
     private lazy var session = URLSession(configuration: .ephemeral, delegate: self, delegateQueue: nil)
 
@@ -95,6 +96,77 @@ final class NexaClient: NSObject, URLSessionTaskDelegate {
             }
             continuation.onTermination = { _ in worker.cancel() }
         }
+    }
+
+    /// One message of the shared conversation (kiosk, phone, Telegram: serve.py keeps them all).
+    struct HistoryMessage: Equatable {
+        let fromUser: Bool
+        let text: String
+    }
+
+    /// The shared conversation, oldest first. `/media/` links are made absolute so kiosk pictures load here.
+    func history() async throws -> [HistoryMessage] {
+        var request = try request("history")
+        request.timeoutInterval = 10
+        let (data, response) = try await session.data(for: request)
+        try Self.check(response, body: String(decoding: data, as: UTF8.self))
+        let json = try? JSONSerialization.jsonObject(with: data)
+        let list = ((json as? [String: Any])?["history"] as? [[String: Any]]) ?? (json as? [[String: Any]])
+        guard let list else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            throw NexaError.notJSON(code, String(String(decoding: data, as: UTF8.self).prefix(80)))
+        }
+        return list.compactMap { item in
+            let role = item["role"] as? String
+            guard role == "user" || role == "assistant", let content = item["content"] as? String, !content.isEmpty
+            else { return nil }
+            return HistoryMessage(fromUser: role == "user",
+                                  text: ReplyBlocks.rewriteMediaURLs(content, base: Self.base.absoluteString))
+        }
+    }
+
+    /// Read-only probe for Check connection: HTTP status and size of an endpoint's JSON, never its content.
+    func probe(_ path: String) async -> String {
+        do {
+            var request = try request(path)
+            request.timeoutInterval = 10
+            let (data, response) = try await session.data(for: request)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let json = try? JSONSerialization.jsonObject(with: data)
+            let shape: String
+            if let list = json as? [Any] {
+                shape = "a list of \(list.count)"
+            } else if let object = json as? [String: Any] {
+                let parts = object.keys.sorted().prefix(4).map { key -> String in
+                    if let list = object[key] as? [Any] { return "\(key): \(list.count)" }
+                    return key
+                }
+                shape = "{" + parts.joined(separator: ", ") + "}"
+            } else {
+                shape = "not JSON"
+            }
+            return "HTTP \(code), \(shape)"
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    /// Loads a picture. Nexa's own media sits behind Access, so only those requests carry the token.
+    func imageData(_ url: URL) async throws -> Data {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 20
+        if url.host == Self.base.host {
+            request = try self.request(String(url.path.dropFirst()))
+            request.url = url
+            request.timeoutInterval = 20
+            let (data, response) = try await session.data(for: request)
+            try Self.check(response, body: "")
+            return data
+        }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(code) else { throw NexaError.http(code, "") }
+        return data
     }
 
     /// Tells serve.py what the user actually heard before cutting in, so history keeps only that.

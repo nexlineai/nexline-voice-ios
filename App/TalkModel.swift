@@ -28,8 +28,8 @@ final class TalkModel: ObservableObject {
         case speaking = "Speaking"
     }
 
-    struct Line: Identifiable {
-        let id = UUID()
+    struct Line: Identifiable, Equatable {
+        var id = UUID().uuidString
         let fromUser: Bool
         var text: String
     }
@@ -47,7 +47,10 @@ final class TalkModel: ObservableObject {
 
     @Published private(set) var phase: Phase = .off
     @Published private(set) var hearing = ""
+    /// The shared conversation (kiosk included), refreshed from serve.py while the app is open.
     @Published private(set) var lines: [Line] = []
+    /// A typed message is being answered while voice is off.
+    @Published private(set) var typing = false
     @Published private(set) var log: [LogLine] = []
     @Published private(set) var checking = false
     @Published private(set) var keysSet = TalkModel.keysPresent()
@@ -63,7 +66,13 @@ final class TalkModel: ObservableObject {
     private let deepgram = DeepgramListener()
     private let mic = MicRouter()
     private let voices = VoiceChain()
-    private let nexa = NexaClient()
+    private let nexa = NexaClient.shared
+    private var historyTask: Task<Void, Never>?
+    private var typedTask: Task<Void, Never>?
+    private var historyProblem: String?
+    private var lastTurnAt = 0.0
+    /// The reply whose OPEN: line was already launched, so coming back to the app doesn't launch it again.
+    private var launchedReply: String?
     /// Who is listening right now (Deepgram falls back to the iPhone mid-session).
     private var ears = EarsChoice.iphone
     private var detector = BargeInDetector()
@@ -115,6 +124,99 @@ final class TalkModel: ObservableObject {
 
     func keysChanged() {
         keysSet = Self.keysPresent()
+    }
+
+    // MARK: The shared conversation
+
+    /// Keeps the conversation in step with the kiosk while the app is on screen.
+    func startSync() {
+        guard historyTask == nil else { return }
+        historyTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.refreshHistory()
+                try? await Task.sleep(for: .seconds(4))
+            }
+        }
+    }
+
+    func stopSync() {
+        historyTask?.cancel()
+        historyTask = nil
+    }
+
+    /// Never during a turn (it would replace the reply being streamed), and not with fewer messages than shown
+    /// right after a turn, when serve.py may not have saved it yet.
+    private func refreshHistory() async {
+        guard keysSet, !turnBusy else { return }
+        do {
+            let messages = try await nexa.history()
+            guard !turnBusy else { return }
+            let fresh = messages.enumerated().map { Line(id: "h\($0.offset)", fromUser: $0.element.fromUser, text: $0.element.text) }
+            if historyProblem != nil || lines.isEmpty && !fresh.isEmpty {
+                note("conversation: \(fresh.count) messages from serve.py")
+            }
+            historyProblem = nil
+            if fresh.count < lines.count && Self.now - lastTurnAt < 15 { return }
+            let same = fresh.count == lines.count
+                && zip(fresh, lines).allSatisfy { $0.fromUser == $1.fromUser && $0.text == $1.text }
+            if !same { lines = fresh }
+        } catch {
+            let problem = error.localizedDescription
+            if problem != historyProblem { note("conversation: can't load (\(problem))") }
+            historyProblem = problem
+        }
+    }
+
+    private var turnBusy: Bool {
+        chatTask != nil || typing || phase == .thinking || phase == .speaking
+    }
+
+    /// A typed message. With voice on it is a turn like a spoken one (and cuts Nexa off if she is talking);
+    /// with voice off the reply only shows as text.
+    func sendTyped(_ raw: String) {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, keysSet else { return }
+        switch phase {
+        case .off:
+            sendTextOnly(text)
+        case .starting:
+            return
+        case .listening:
+            endpointer.reset()
+            hearing = ""
+            send(text)
+        case .thinking, .speaking:
+            cutIn()
+            endpointer.reset()
+            send(text)
+        }
+    }
+
+    private func sendTextOnly(_ text: String) {
+        typedTask?.cancel()
+        lines.append(Line(fromUser: true, text: text))
+        lines.append(Line(fromUser: false, text: ""))
+        lastTurnAt = Self.now
+        typing = true
+        typedTask = Task { [weak self] in
+            guard let self else { return }
+            var reply = ""
+            do {
+                for try await event in self.nexa.chat(text) {
+                    if case .text(let full) = event {
+                        reply = full
+                        self.showReply(full)
+                    }
+                }
+            } catch {
+                if !Task.isCancelled {
+                    self.note("Nexa: \(error.localizedDescription)")
+                    if reply.isEmpty { self.showReply("(no reply: \(error.localizedDescription))") }
+                }
+            }
+            self.lastTurnAt = Self.now
+            self.typing = false
+        }
     }
 
     // MARK: Start and stop
@@ -274,6 +376,7 @@ final class TalkModel: ObservableObject {
         let gen = generation
         lines.append(Line(fromUser: true, text: text))
         lines.append(Line(fromUser: false, text: ""))
+        lastTurnAt = Self.now
         phase = .thinking
         turnEndedAt = Self.now
         firstTextAt = nil
@@ -319,7 +422,7 @@ final class TalkModel: ObservableObject {
 
     private func showReply(_ text: String) {
         guard let last = lines.indices.last, !lines[last].fromUser else { return }
-        lines[last].text = text
+        lines[last].text = ReplyBlocks.rewriteMediaURLs(text, base: NexaClient.base.absoluteString)
     }
 
     private func speak(_ piece: String, _ gen: Int) {
@@ -397,7 +500,21 @@ final class TalkModel: ObservableObject {
     private func finishReply() {
         chatTask = nil
         speakTask = nil
+        lastTurnAt = Self.now
+        launchOpenLine()
         beginListening()
+    }
+
+    /// Voice mode opens the app a reply asks for ("play X on YouTube" → OPEN:youtube:X), once, after the reply
+    /// has finished: mid-stream the line may still be partial.
+    private func launchOpenLine() {
+        guard UserDefaults.standard.object(forKey: AppLauncher.settingKey) as? Bool ?? true,
+              let reply = lines.last(where: { !$0.fromUser })?.text, reply != launchedReply,
+              let link = reply.components(separatedBy: "\n").compactMap(AppLink.parse).last
+        else { return }
+        launchedReply = reply
+        note("opening \(link.label)" + (link.query.map { ": \($0)" } ?? ""))
+        AppLauncher.open(link)
     }
 
     private func cutReply(report: Bool, heard: String = "") {
@@ -432,6 +549,10 @@ final class TalkModel: ObservableObject {
         } catch {
             note("Nexa: FAIL, \(error.localizedDescription)")
         }
+        let history = await nexa.probe("history")
+        note("Nexa history: " + history)
+        let home = await nexa.probe("ha/states")
+        note("Nexa home (HA): " + home)
 
         if Keychain.get(.deepgramKey) != nil {
             do {
