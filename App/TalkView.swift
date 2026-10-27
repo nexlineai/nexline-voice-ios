@@ -3,7 +3,7 @@ import SwiftUI
 
 struct TalkView: View {
     @StateObject private var model = TalkModel()
-    @State private var showKeys = false
+    @State private var showSettings = false
 
     var body: some View {
         NavigationStack {
@@ -29,7 +29,7 @@ struct TalkView: View {
                 } footer: {
                     Text(model.keysSet
                          ? "Talk, pause, and Nexa answers. Talk over her to cut in."
-                         : "Add the keys first (Keys, top right).")
+                         : "Add Nexa's token first (Settings, top right).")
                 }
 
                 if !model.lines.isEmpty {
@@ -52,7 +52,8 @@ struct TalkView: View {
                     Button("Copy log") { model.copyLog() }
                         .disabled(model.log.isEmpty)
                 } footer: {
-                    Text("Check connection doesn't talk to Nexa, so nothing shows up on the kiosk.")
+                    Text("Checks Nexa's token and the Deepgram key, then each voice says one sentence. "
+                         + "It doesn't talk to Nexa, so nothing shows up on the kiosk.")
                 }
 
                 Section("Log") {
@@ -63,27 +64,51 @@ struct TalkView: View {
             }
             .navigationTitle("Nexa")
             .toolbar {
-                Button("Keys") { showKeys = true }
+                Button("Settings") { showSettings = true }
                     .disabled(model.phase != .off)
             }
-            .sheet(isPresented: $showKeys, onDismiss: { model.keysChanged() }) {
-                KeysView()
+            .sheet(isPresented: $showSettings, onDismiss: { model.keysChanged() }) {
+                SettingsView()
             }
         }
     }
 }
 
-/// Paste the keys from the Passwords app. They go to this iPhone's Keychain only.
-private struct KeysView: View {
+/// Who speaks and who listens, plus the keys (pasted from a password manager; they go to this iPhone's
+/// Keychain only).
+private struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
+    @AppStorage(VoiceChoice.storageKey) private var voice = VoiceChoice.xai
+    @AppStorage(EarsChoice.storageKey) private var ears = EarsChoice.deepgram
     @State private var clientID = ""
     @State private var clientSecret = ""
     @State private var xaiKey = ""
+    @State private var deepgramKey = ""
     @State private var refresh = 0
 
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    Picker("Voice", selection: $voice) {
+                        ForEach(VoiceChoice.allCases) { Text($0.label).tag($0) }
+                    }
+                } header: {
+                    Text("Nexa speaks with")
+                } footer: {
+                    Text("If it fails: " + voice.chain.dropFirst().map(\.name).joined(separator: ", then ") + ".")
+                }
+
+                Section {
+                    Picker("Listening", selection: $ears) {
+                        ForEach(EarsChoice.allCases) { Text($0.label).tag($0) }
+                    }
+                } header: {
+                    Text("Nexa listens with")
+                } footer: {
+                    Text(ears == .deepgram ? "If it fails: the iPhone." : "On the iPhone, works offline.")
+                }
+
                 Section {
                     TextField("Client ID", text: $clientID)
                         .textInputAutocapitalization(.never)
@@ -104,16 +129,25 @@ private struct KeysView: View {
                 }
 
                 Section {
+                    SecureField("Deepgram API key", text: $deepgramKey)
+                } header: {
+                    Text("Deepgram: listening")
+                } footer: {
+                    Text(status(.deepgramKey))
+                }
+
+                Section {
                     Button("Delete all keys", role: .destructive) {
                         for key in Keychain.Key.allCases { Keychain.set(key, "") }
                         refresh += 1
                     }
                 } footer: {
-                    Text("An empty field keeps what's saved. Keys stay on this iPhone, never in backups.")
+                    Text("An empty field keeps what's saved. Keys stay on this iPhone, never in backups. "
+                         + "Only Nexa's token is required; without the others the fallbacks take over.")
                 }
             }
             .id(refresh)
-            .navigationTitle("Keys")
+            .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -124,6 +158,7 @@ private struct KeysView: View {
                         save(.nexaClientID, clientID)
                         save(.nexaClientSecret, clientSecret)
                         save(.xaiKey, xaiKey)
+                        save(.deepgramKey, deepgramKey)
                         dismiss()
                     }
                 }
@@ -136,7 +171,7 @@ private struct KeysView: View {
         switch key {
         case .nexaClientID: name = "ID"
         case .nexaClientSecret: name = "secret"
-        case .xaiKey: name = "key"
+        case .xaiKey, .deepgramKey: name = "key"
         }
         return "\(name): \(Keychain.get(key) == nil ? "not set" : "saved")"
     }

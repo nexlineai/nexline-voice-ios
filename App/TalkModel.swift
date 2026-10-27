@@ -60,7 +60,12 @@ final class TalkModel: ObservableObject {
 
     private let engine = VoiceEngine()
     private let listener = Listener()
+    private let deepgram = DeepgramListener()
+    private let mic = MicRouter()
+    private let voices = VoiceChain()
     private let nexa = NexaClient()
+    /// Who is listening right now (Deepgram falls back to the iPhone mid-session).
+    private var ears = EarsChoice.iphone
     private var detector = BargeInDetector()
     private var endpointer = Endpointer()
     private var observers: [NSObjectProtocol] = []
@@ -91,19 +96,21 @@ final class TalkModel: ObservableObject {
     private var playing: Bool { Self.now < playbackEnd }
 
     init() {
-        let recognizer = self.listener
+        let router = self.mic
         engine.onMicBlock = { [weak self] block in
             Task { @MainActor in self?.micBlock(block) }
         }
-        engine.onMicBuffer = { buffer in recognizer.feed(buffer) }
+        engine.onMicBuffer = { buffer in router.feed(buffer) }
+        voices.onNote = { [weak self] message in self?.note(message) }
         engine.onEvent = { [weak self] message in
             Task { @MainActor in self?.note(message) }
         }
         observeSession()
     }
 
+    /// Only Nexa's token is required: without the xAI or Deepgram key the fallbacks take over.
     nonisolated static func keysPresent() -> Bool {
-        Keychain.Key.allCases.allSatisfy { Keychain.get($0) != nil }
+        Keychain.get(.nexaClientID) != nil && Keychain.get(.nexaClientSecret) != nil
     }
 
     func keysChanged() {
@@ -119,17 +126,17 @@ final class TalkModel: ObservableObject {
     func start() async {
         guard phase == .off else { return }
         guard keysSet else {
-            note("add the keys first (Keys)")
+            note("add Nexa's token first (Settings)")
             return
         }
         phase = .starting
+        let voice = VoiceChoice.current
+        voices.reset(primary: voice)
+        note("voice: " + voice.chain.map(\.name).joined(separator: " → "))
         do {
             try engine.configureSession(Self.setup)
             try engine.start(voiceProcessing: true)
-            try await listener.start(
-                localeID: Self.localeID,
-                onResult: { [weak self] text, isFinal in self?.recognized(text, isFinal: isFinal) },
-                onEvent: { [weak self] message in self?.note(message) })
+            try await startEars(EarsChoice.current)
         } catch {
             note("start failed: \(error.localizedDescription)")
             await stop()
@@ -148,6 +155,8 @@ final class TalkModel: ObservableObject {
         cutReply(report: false)
         tickTask?.cancel()
         tickTask = nil
+        mic.target = nil
+        deepgram.stop()
         await listener.stop()
         engine.stop()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
@@ -164,6 +173,49 @@ final class TalkModel: ObservableObject {
 
     // MARK: Hearing the user
 
+    /// Starts Deepgram, or the iPhone's recognizer when Deepgram is not chosen or can't start.
+    private func startEars(_ choice: EarsChoice) async throws {
+        if choice == .deepgram {
+            do {
+                // Deepgram says when speech ended; these gaps are only the backstop.
+                endpointer = Endpointer(finalGap: 1.6, volatileGap: 2.5)
+                let stream = self.deepgram
+                mic.target = { buffer in stream.feed(buffer) }
+                try deepgram.start(
+                    onResult: { [weak self] text, isFinal, endsAt in self?.recognized(text, isFinal: isFinal, endsAt: endsAt) },
+                    onSpeechEnd: { [weak self] in self?.speechEnded() },
+                    onFail: { [weak self] reason in Task { await self?.earsFailed(reason) } })
+                ears = .deepgram
+                note("listening with Deepgram")
+                return
+            } catch {
+                mic.target = nil
+                note("listening: Deepgram can't start (\(error.localizedDescription)), using the iPhone")
+            }
+        }
+        endpointer = Endpointer()
+        let recognizer = self.listener
+        mic.target = { buffer in recognizer.feed(buffer) }
+        try await listener.start(
+            localeID: Self.localeID,
+            onResult: { [weak self] text, isFinal in self?.recognized(text, isFinal: isFinal, endsAt: nil) },
+            onEvent: { [weak self] message in self?.note(message) })
+        ears = .iphone
+    }
+
+    private func earsFailed(_ reason: String) async {
+        guard phase != .off, ears == .deepgram else { return }
+        note("listening: Deepgram failed (\(reason)), using the iPhone")
+        mic.target = nil
+        do {
+            try await startEars(.iphone)
+            if phase == .listening { beginListening() }
+        } catch {
+            note("listening: the iPhone failed too (\(error.localizedDescription)), stopped")
+            await stop()
+        }
+    }
+
     private func micBlock(_ block: VoiceEngine.MicBlock) {
         let playing = self.playing
         meter.db = block.levelDB
@@ -173,10 +225,17 @@ final class TalkModel: ObservableObject {
         if speech && phase == .speaking { cutIn() }
     }
 
-    private func recognized(_ text: String, isFinal: Bool) {
+    private func recognized(_ text: String, isFinal: Bool, endsAt: Double?) {
         guard phase == .listening else { return }
+        // Deepgram's results arrive late: one whose audio ended before listening began is Nexa's echo.
+        if let endsAt, endsAt < listeningSince { return }
         endpointer.add(text, isFinal: isFinal, at: Self.now)
         hearing = endpointer.text
+    }
+
+    private func speechEnded() {
+        guard phase == .listening else { return }
+        endpointer.speechEnded(at: Self.now)
     }
 
     private func tick() {
@@ -272,7 +331,7 @@ final class TalkModel: ObservableObject {
     private func open(_ segment: SpeechText.Segment) -> Job {
         switch segment {
         case .silence(let ms): return .silence(ms: ms)
-        case .text(let text): return .voice(text, XAIVoice.stream(text))
+        case .text(let text): return .voice(text, voices.stream(text))
         }
     }
 
@@ -356,8 +415,9 @@ final class TalkModel: ObservableObject {
 
     // MARK: Check connection
 
-    /// Read-only checks: the token passes Access, and xAI speaks one fixed sentence. Nothing reaches the
-    /// conversation, so the kiosk doesn't see it.
+    /// Read-only checks: the token passes Access, the Deepgram key is accepted, and each voice speaks one fixed
+    /// sentence, so every fallback is known to work before it's needed. Nothing reaches the conversation, so
+    /// the kiosk doesn't see it.
     func checkConnection() async {
         guard !checking, phase == .off else { return }
         checking = true
@@ -370,23 +430,46 @@ final class TalkModel: ObservableObject {
             note("Nexa: FAIL, \(error.localizedDescription)")
         }
 
+        if Keychain.get(.deepgramKey) != nil {
+            do {
+                let status = try await DeepgramListener.checkKey()
+                note("Deepgram: OK, \(status)")
+            } catch {
+                note("Deepgram: FAIL, \(error.localizedDescription)")
+            }
+        } else {
+            note("Deepgram: no key, the iPhone listens")
+        }
+
         do {
             try engine.configureSession(Self.setup)
             try engine.start(voiceProcessing: true)
+        } catch {
+            note("voices: FAIL, \(error.localizedDescription)")
+            return
+        }
+        for choice in VoiceChoice.allCases {
             let started = Self.now
             var first: Double?
             var seconds = 0.0
-            for try await chunk in XAIVoice.stream("Hi, this is Nexa's new voice.") {
-                if first == nil { first = Self.now - started }
-                seconds += engine.enqueue(chunk)
+            do {
+                for try await chunk in VoiceChain.source(choice, "This is the \(choice.name) voice.") {
+                    if first == nil { first = Self.now - started }
+                    seconds += engine.enqueue(chunk)
+                }
+                guard let first else { throw CheckError.noAudio }
+                note(String(format: "voice %@: OK, first audio %.1f s", choice.name, first))
+                try? await Task.sleep(for: .seconds(seconds + 0.4))
+            } catch {
+                note("voice \(choice.name): FAIL, \(error.localizedDescription)")
             }
-            guard let first else { throw XAIVoice.VoiceError.server("no audio") }
-            note(String(format: "xAI voice: OK, first audio %.1f s, %.1f s of speech", first, seconds))
-            try? await Task.sleep(for: .seconds(seconds + 0.5))
-        } catch {
-            note("xAI voice: FAIL, \(error.localizedDescription)")
         }
         engine.stop()
+    }
+
+    private enum CheckError: LocalizedError {
+        case noAudio
+        var errorDescription: String? { "no audio" }
     }
 
     // MARK: Session events and log
@@ -428,5 +511,21 @@ final class TalkModel: ObservableObject {
         logCount += 1
         log.append(LogLine(id: logCount, text: text))
         if log.count > 80 { log.removeFirst(log.count - 80) }
+    }
+}
+
+/// Hands the engine's mic buffers to whoever is listening (Deepgram or the iPhone's recognizer).
+/// `feed` runs on the audio thread.
+final class MicRouter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _target: ((AVAudioPCMBuffer) -> Void)?
+
+    var target: ((AVAudioPCMBuffer) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return _target }
+        set { lock.lock(); _target = newValue; lock.unlock() }
+    }
+
+    func feed(_ buffer: AVAudioPCMBuffer) {
+        target?(buffer)
     }
 }

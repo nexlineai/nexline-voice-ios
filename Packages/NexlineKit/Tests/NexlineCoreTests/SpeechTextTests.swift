@@ -145,4 +145,42 @@ final class EndpointerTests: XCTestCase {
         XCTAssertEqual(e.text, "")
         XCTAssertNil(e.take(at: 10))
     }
+
+    func testSpeechEndEndsAFinishedSentenceAtOnce() {
+        var e = Endpointer(finalGap: 1.6, volatileGap: 2.5)
+        e.add("What time is it?", isFinal: true, at: 1)
+        XCTAssertNil(e.take(at: 1.2))
+        e.speechEnded(at: 1.2)
+        XCTAssertEqual(e.take(at: 1.2), "What time is it?")
+    }
+
+    func testSpeechEndWaitsWhenItTrailsOff() {
+        var e = Endpointer(finalGap: 1.6, volatileGap: 2.5)
+        e.add("turn on the", isFinal: true, at: 1)
+        e.speechEnded(at: 1)
+        XCTAssertNil(e.take(at: 2))
+        XCTAssertEqual(e.take(at: 2.5), "turn on the")
+    }
+
+    func testTalkingAgainCancelsTheSpeechEnd() {
+        var e = Endpointer(finalGap: 1.6, volatileGap: 2.5)
+        e.add("Okay so,", isFinal: true, at: 1)
+        e.speechEnded(at: 1)
+        e.add("check the", isFinal: false, at: 1.5)
+        XCTAssertNil(e.take(at: 3))
+        e.add("check the lights.", isFinal: true, at: 3)
+        e.speechEnded(at: 3)
+        XCTAssertEqual(e.take(at: 3), "Okay so, check the lights.")
+    }
+
+    func testLooksUnfinished() {
+        XCTAssertTrue(Endpointer.looksUnfinished("turn on the"))
+        XCTAssertTrue(Endpointer.looksUnfinished("I want to,"))
+        XCTAssertTrue(Endpointer.looksUnfinished("okay so"))
+        XCTAssertTrue(Endpointer.looksUnfinished("liga a luz da"))
+        XCTAssertFalse(Endpointer.looksUnfinished("Stop."))
+        XCTAssertFalse(Endpointer.looksUnfinished("what time is it?"))
+        XCTAssertFalse(Endpointer.looksUnfinished("turn on the lights"))
+        XCTAssertFalse(Endpointer.looksUnfinished(""))
+    }
 }

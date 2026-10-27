@@ -30,9 +30,17 @@ Plan, decisions and the feature cut-list are in the vault:
   player, so the bot can be interrupted without hearing itself. `SpeechClip` is unused (kept for an
   on-device fallback voice).
 - App: `TalkModel` runs the conversation (listen → Nexa → speak → listen, cut-in on the barge-in detector).
-  `Listener` = iOS 26 SpeechAnalyzer/SpeechTranscriber fed from the engine's mic tap. `NexaClient` = serve.py
-  `/chat` on `nexa.nexline.ai` with a Cloudflare Access service token (redirects disabled: a rejected token is a
-  302 to the login page). `XAIVoice` = xAI streaming TTS, voice `ara`. `Keychain` holds the three keys.
+  `NexaClient` = serve.py `/chat` on `nexa.nexline.ai` with a Cloudflare Access service token (redirects disabled:
+  a rejected token is a 302 to the login page; `/watchdog/version` answers `{"version": N}`). `Keychain` holds the
+  keys; only Nexa's token is required, the others have fallbacks. `Settings` = Zé's choices (UserDefaults).
+- Speaking: `VoiceChain` = the chosen voice, then xAI → Edge → iPhone. A voice that fails before its first audio
+  (error, no key, deadline) hands the same piece on and is skipped for the session; one that fails mid-sentence is
+  not replaced. `XAIVoice` (streaming, `ara`), `EdgeVoice` (free, MP3 per piece, decoded via a temp file),
+  `DeviceVoice` (SpeechClip; whether `write()` is safe while the voice-processing engine runs is unproven).
+- Listening: `MicRouter` hands mic buffers to `DeepgramListener` (Nova-3 streaming, keyterms, `speech_final` /
+  `UtteranceEnd` end the turn via `Endpointer.speechEnded`) or `Listener` (iOS 26 SpeechAnalyzer, on-device).
+  Deepgram failing at start or mid-session switches to `Listener`. Deepgram results carry their audio end time;
+  one that ended before listening began is Nexa's echo and is dropped.
 - Enabling voice processing changes the IO formats while the engine is set up, so the engine starts with a
   configuration change pending and stops itself right away (spike builds 1-3). Fixed in build 4: resume the same
   engine (reinstall the tap, prepare, start; no session or voice-processing calls). Never answer a configuration
