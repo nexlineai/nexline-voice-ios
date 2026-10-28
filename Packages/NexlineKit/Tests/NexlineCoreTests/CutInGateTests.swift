@@ -50,6 +50,31 @@ final class CutInGateTests: XCTestCase {
         XCTAssertEqual(blocks(&gate, loud: true, from: 10.6, to: 11.1), .cut(pausedAt: 10, words: nil))
     }
 
+    func testHerWordsAsTheRecognizerWritesThem() {
+        let her = CutInGate.vocabulary("There was a lighthouse keeper on the Alentejo coast. One, two, three.")
+        XCTAssertFalse(CutInGate.isForeign("light", to: her))       // part of "lighthouse"
+        XCTAssertFalse(CutInGate.isForeign("house", to: her))
+        XCTAssertFalse(CutInGate.isForeign("Alentejos", to: her))   // a letter off
+        XCTAssertFalse(CutInGate.isForeign("keepers,", to: her))
+        XCTAssertFalse(CutInGate.isForeign("1.", to: her))          // numbers never count
+        XCTAssertFalse(CutInGate.isForeign("no", to: her))          // nor words under three letters
+        XCTAssertTrue(CutInGate.isForeign("stop", to: her))
+        XCTAssertTrue(CutInGate.isForeign("Wait,", to: her))
+    }
+
+    func testOnASpeakerHerLateWordsDontCutButYoursDo() {
+        var gate = CutInGate()
+        gate.leadIn = 1.5
+        gate.echoTail = 0.6
+        gate.pause(at: 20, herText: "There was a lighthouse keeper on the Alentejo coast")
+        // Her words (some misheard) from before the pause, recognized late.
+        XCTAssertEqual(gate.heard([HeardWord("light", start: 18.9, end: 19.1), HeardWord("house", start: 19.1, end: 19.4),
+                                   HeardWord("keepers", start: 19.4, end: 19.8)]), .wait)
+        // The user's word that caused the pause, re-sent as final.
+        XCTAssertEqual(gate.heard([HeardWord("coast", start: 19.0, end: 19.3), HeardWord("stop", start: 19.3, end: 19.7)]),
+                       .cut(pausedAt: 20, words: "stop"))
+    }
+
     func testNothingHappensUnlessPaused() {
         var gate = CutInGate()
         XCTAssertEqual(gate.level(loud: true, at: 1), .wait)

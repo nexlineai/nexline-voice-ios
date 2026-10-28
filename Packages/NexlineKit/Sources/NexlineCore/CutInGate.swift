@@ -42,7 +42,8 @@ public struct CutInGate: Sendable {
     public var echoTail = 0.4
 
     public private(set) var pausedAt: Double?
-    private var herWords: Set<String> = []
+    /// Her words while paused, to tell her echo from the user.
+    public private(set) var herWords: Set<String> = []
     private var lastLoudAt = 0.0
     private var loudSince = 0.0
 
@@ -53,7 +54,7 @@ public struct CutInGate: Sendable {
     /// A sound over her voice: she is paused now. `herText` is what she was saying, to tell her echo from you.
     public mutating func pause(at time: Double, herText: String) {
         pausedAt = time
-        herWords = Set(Self.words(herText))
+        herWords = Self.vocabulary(herText)
         lastLoudAt = time
         loudSince = time
     }
@@ -74,12 +75,57 @@ public struct CutInGate: Sendable {
     /// Words the recognizer returned while she is paused.
     public mutating func heard(_ words: [HeardWord]) -> Action {
         guard let pausedAt else { return .wait }
-        let yours = words.filter { word in
-            guard word.end >= pausedAt - leadIn else { return false }
-            return word.end >= pausedAt + echoTail || !herWords.contains(Self.normalized(word.text))
-        }
+        let yours = self.yours(words, pausedAt: pausedAt, herWords: herWords)
         guard !yours.isEmpty else { return .wait }
         return finish(.cut(pausedAt: pausedAt, words: yours.map(\.text).joined(separator: " ")))
+    }
+
+    /// The user's words for a pause at `pausedAt`: any word ending `echoTail` after it (she is silent by then), and
+    /// words ending in the `leadIn` before it that can't be hers.
+    public func yours(_ words: [HeardWord], pausedAt: Double, herWords: Set<String>) -> [HeardWord] {
+        words.filter { word in
+            if word.end >= pausedAt + echoTail { return true }
+            return word.end >= pausedAt - leadIn && Self.isForeign(word.text, to: herWords)
+        }
+    }
+
+    /// The words of `text`, as compared here.
+    public static func vocabulary(_ text: String) -> Set<String> {
+        Set(text.split(whereSeparator: \.isWhitespace).map { normalized(String($0)) }.filter { !$0.isEmpty })
+    }
+
+    /// True when `word` can't be one of `herWords` as the recognizer may have written it. A word counts as hers
+    /// when it's equal, a letter off (two for long words), or part of one ("light" in "lighthouse"). Numbers and
+    /// words under three letters never count against her: the recognizer writes those its own way ("1" for "one",
+    /// "I am" for "I'm").
+    public static func isForeign(_ word: String, to herWords: Set<String>) -> Bool {
+        let w = normalized(word)
+        guard w.count >= 3, !w.allSatisfy(\.isNumber) else { return false }
+        return !herWords.contains { matches(w, $0) }
+    }
+
+    static func matches(_ a: String, _ b: String) -> Bool {
+        if a == b { return true }
+        let shorter = min(a.count, b.count)
+        let longer = max(a.count, b.count)
+        if shorter >= 4 && (a.contains(b) || b.contains(a)) { return true }
+        let allowed = longer >= 8 ? 2 : (shorter >= 4 ? 1 : 0)
+        return allowed > 0 && longer - shorter <= allowed && distance(Array(a), Array(b)) <= allowed
+    }
+
+    /// Edit distance (insertions, deletions, substitutions).
+    private static func distance(_ a: [Character], _ b: [Character]) -> Int {
+        var row = Array(0...b.count)
+        for i in 1...max(1, a.count) where !a.isEmpty {
+            var previous = row[0]
+            row[0] = i
+            for j in 1...max(1, b.count) where !b.isEmpty {
+                let current = row[j]
+                row[j] = min(row[j] + 1, row[j - 1] + 1, previous + (a[i - 1] == b[j - 1] ? 0 : 1))
+                previous = current
+            }
+        }
+        return row[b.count]
     }
 
     public mutating func reset() {
@@ -94,9 +140,5 @@ public struct CutInGate: Sendable {
 
     private static func normalized(_ word: String) -> String {
         word.lowercased().filter { $0.isLetter || $0.isNumber }
-    }
-
-    private static func words(_ text: String) -> [String] {
-        text.split(whereSeparator: \.isWhitespace).map { normalized(String($0)) }.filter { !$0.isEmpty }
     }
 }

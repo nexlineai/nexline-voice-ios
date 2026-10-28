@@ -124,7 +124,8 @@ final class TalkModel: ObservableObject {
     private var bargeInOn = true
     /// Playing on a music-only speaker (Bluetooth A2DP, AirPlay) without echo cancellation. Voice processing only
     /// allows call routes, so iOS played her on the iPhone instead of the JBL (build 18); headphones and cars move
-    /// to their call profile instead and keep it. No cut-in by voice here, she'd hear herself: the orb tap stops her.
+    /// to their call profile instead and keep it. The mic hears her here, so loudness can't cut her off: words that
+    /// aren't in her reply do (build 22).
     private var speakerMode = false
     private var windowUntil = 0.0
     private var resumeVoiceAfterMusic = false
@@ -155,8 +156,10 @@ final class TalkModel: ObservableObject {
     /// When the user's last recognized word ended, and what ended their speech, for the turn-end log line.
     private var lastWordAt: Double?
     private var speechEndedBy: String?
-    /// After words cut her off at a pause: words of this turn that ended before the pause are her echo.
-    private var echoCutoff: Double?
+    /// Her words when she was paused, and after words cut her off there: this turn's words around the pause that
+    /// are hers are her echo.
+    private var pausedHerWords: Set<String> = []
+    private var echoCut: (at: Double, herWords: Set<String>)?
     /// Carapava and Mamadona keep their history on their own server, so a cut-off reply is only fixed there
     /// by telling them on the next turn what the user heard.
     private var agentCutNote: String?
@@ -485,6 +488,7 @@ final class TalkModel: ObservableObject {
             try engine.configureSession(Self.setup)
             let speaker = Self.musicOutput
             speakerMode = false
+            gate = CutInGate()
             try engine.start(voiceProcessing: true)
             if let speaker {
                 // Voice processing moves the route; give it a moment, then see where she ended up.
@@ -494,7 +498,10 @@ final class TalkModel: ObservableObject {
                     try engine.configureSession(Self.setup)
                     try engine.start(voiceProcessing: false)
                     speakerMode = true
-                    note("\(speaker) only plays music: echo cancellation off so she plays there, tap the orb to stop her")
+                    // Words reach the recognizer late, and her voice keeps playing for the speaker's latency.
+                    gate.leadIn = 1.5
+                    gate.echoTail = 0.4 + AVAudioSession.sharedInstance().outputLatency
+                    note("\(speaker) only plays music: echo cancellation off so she plays there; words that aren't hers stop her")
                 }
             }
             try await startEars(EarsChoice.current)
@@ -527,7 +534,7 @@ final class TalkModel: ObservableObject {
     }
 
     private func beginListening() {
-        echoCutoff = nil
+        echoCut = nil
         endpointer.reset()
         hearing = ""
         listeningSince = Self.now
@@ -607,6 +614,7 @@ final class TalkModel: ObservableObject {
             // Only Deepgram gives word times to tell the user from her echo; the iPhone's recognizer cuts at once.
             if ears == .deepgram {
                 gate.pause(at: now, herText: timeline.text(around: now) + " " + speakingText)
+                pausedHerWords = gate.herWords
                 engine.pausePlayback()
             } else {
                 cutIn()
@@ -636,15 +644,30 @@ final class TalkModel: ObservableObject {
     }
 
     private func recognized(_ text: String, isFinal: Bool, endsAt: Double?, words: [HeardWord] = []) {
-        // While she is paused for a sound, words decide it; if they cut her off, this result starts the turn.
-        if gate.isPaused && !muted { act(gate.heard(words), at: Self.now) }
+        if gate.isPaused && !muted {
+            // While she is paused for a sound, words decide it; if they cut her off, this result starts the turn.
+            act(gate.heard(words), at: Self.now)
+        } else if speakerMode && phase == .speaking && bargeInOn && !muted {
+            // No echo cancellation on a speaker: the mic hears her too, so words that aren't in her reply are the
+            // user. They pause her, and words that follow confirm it as on the phone.
+            let script = lines.last(where: { !$0.fromUser }).map { SpeechText.clean($0.text) } ?? ""
+            let herWords = CutInGate.vocabulary(script)
+            let yours = words.filter { $0.end > turnEndedAt && CutInGate.isForeign($0.text, to: herWords) }
+            if !yours.isEmpty {
+                note("words over her on the speaker: \"\(yours.map(\.text).joined(separator: " "))\"")
+                gate.pause(at: Self.now, herText: script)
+                pausedHerWords = gate.herWords
+                engine.pausePlayback()
+            }
+        }
         guard phase == .listening, !muted else { return }
         // Deepgram's results arrive late: one whose audio ended before listening began is Nexa's echo.
         if let endsAt, endsAt < listeningSince { return }
-        // After a cut at a pause, so are its words that ended before the pause (the result can start with her echo).
+        // After a cut at a pause, so are its words around the pause that are hers (a result can start with her echo).
         var text = text
-        if let cutoff = echoCutoff, let first = words.first, first.end < cutoff {
-            text = words.filter { $0.end >= cutoff }.map(\.text).joined(separator: " ")
+        if let cut = echoCut {
+            let kept = gate.yours(words, pausedAt: cut.at, herWords: cut.herWords)
+            if kept.count < words.count { text = kept.map(\.text).joined(separator: " ") }
         }
         if let last = words.last { lastWordAt = last.end }
         endpointer.add(text, isFinal: isFinal, at: Self.now)
@@ -706,7 +729,7 @@ final class TalkModel: ObservableObject {
         // The words that confirmed the cut were said after the pause and are this turn's start.
         if let pausedAt {
             listeningSince = pausedAt
-            echoCutoff = pausedAt
+            echoCut = (pausedAt, pausedHerWords)
         }
         lastLoudAt = now
     }
