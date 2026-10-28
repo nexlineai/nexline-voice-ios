@@ -153,6 +153,11 @@ final class TalkModel: ObservableObject {
     /// a few echo words recognized after Nexa stops could start a turn by themselves (a self-talk loop).
     private var listeningSince = 0.0
     private var lastLoudAt = -1.0
+    /// The mic rose above a quiet voice's line, and when this turn's first word began (Deepgram word times). A quiet
+    /// voice counts when its words began after she stopped: her echo comes from earlier (28 Oct: a quiet "That's
+    /// great" was transcribed and dropped six times on the JBL).
+    private var lastHeardAt = -1.0
+    private var turnWordsFrom: Double?
     /// When the user's last recognized word ended, and what ended their speech, for the turn-end log line.
     private var lastWordAt: Double?
     private var speechEndedBy: String?
@@ -536,6 +541,7 @@ final class TalkModel: ObservableObject {
 
     private func beginListening() {
         echoFilter = nil
+        turnWordsFrom = nil
         endpointer.reset()
         hearing = ""
         listeningSince = Self.now
@@ -549,7 +555,8 @@ final class TalkModel: ObservableObject {
         if choice == .deepgram {
             do {
                 // Deepgram says when speech ended; these gaps are only the backstop.
-                endpointer = Endpointer(finalGap: 1.6, volatileGap: 2.5, sentenceGap: 0.8)
+                // Without a speech end or a final (often on a speaker), an unchanged guess ends the turn after 1.8 s.
+                endpointer = Endpointer(finalGap: 1.6, volatileGap: 1.8, sentenceGap: 0.8)
                 let stream = self.deepgram
                 mic.target = { buffer in stream.feed(buffer) }
                 try deepgram.start(
@@ -600,6 +607,7 @@ final class TalkModel: ObservableObject {
         meter.threshold = detector.threshold(playing: shielded, strict: strict)
         levels.micDB = muted ? Level.silenceDB : block.levelDB
         if !shielded && block.levelDB > detector.threshold(playing: false) { lastLoudAt = now }
+        if !shielded && block.levelDB > max(-55, detector.noiseFloorDB + 8) { lastHeardAt = now }
         let speech = detector.process(levelDB: block.levelDB, durationMs: block.durationMs, playing: shielded,
                                       strict: strict)
         if paused {
@@ -677,6 +685,7 @@ final class TalkModel: ObservableObject {
             if kept.count < words.count { text = kept.map(\.text).joined(separator: " ") }
         }
         if let last = kept.last { lastWordAt = last.end }
+        if let first = kept.first { turnWordsFrom = min(turnWordsFrom ?? first.start, first.start) }
         // Quiet counts from the newest word, so a repeated guess or an empty result doesn't hold the turn open.
         endpointer.add(text, isFinal: isFinal, at: kept.last?.end ?? Self.now)
         hearing = endpointer.text
@@ -703,7 +712,12 @@ final class TalkModel: ObservableObject {
             }
             lastWordAt = nil
             speechEndedBy = nil
-            guard lastLoudAt >= listeningSince else {
+            // On a speaker the mic level says little (it hears her at full volume); her words are filtered by what
+            // she said instead. On the phone a quiet voice must still rise above the lower line.
+            let afterHer = turnWordsFrom.map { $0 >= listeningSince + 0.3 } ?? false
+            let quietVoice = afterHer && (speakerMode || lastHeardAt >= listeningSince)
+            turnWordsFrom = nil
+            guard lastLoudAt >= listeningSince || quietVoice else {
                 note("ignored, the mic never heard you loud enough (echo?): \"\(text)\"")
                 return
             }

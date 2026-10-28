@@ -76,7 +76,9 @@ Plan, decisions and the feature cut-list are in the vault:
   change with a new engine. Each start costs one resume, so the resume cap resets on every start.
   The spike app is tagged `spike-audio-build4`. Evidence is in the vault note.
 - While Nexa thinks or speaks, recognizer text is ignored (it may be her echo); a turn only counts if the mic
-  heard the user above the line, which stops a self-talk loop.
+  heard the user above the line, which stops a self-talk loop. Build 25: with Deepgram, a quiet voice also counts
+  when the turn's first word began 0.3 s or more after listening began, since her echo comes from earlier. On the
+  phone it must still reach max(-55 dB, floor + 8). On a speaker it needs no level, because the floor there rises to her voice.
 - Cut-in (build 16): the whole reply uses the playback line, including the silent gaps between pieces, and the
   first 3.5 s of her voice after a start or route change are strict (+8 dB, 400 ms) while echo cancellation
   settles. The first spoken piece is at least 10 characters.
