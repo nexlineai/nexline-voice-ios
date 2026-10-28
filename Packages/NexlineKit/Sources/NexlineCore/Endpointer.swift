@@ -8,37 +8,52 @@ import Foundation
 ///
 /// Deepgram does say when speech ended (`speech_final`, `UtteranceEnd`): `speechEnded(at:)` ends the turn at
 /// once, unless it looks unfinished ("turn on the"), which waits `unfinishedGap` for more. Port of the RN
-/// app's semantic endpointing gate.
+/// app's semantic endpointing gate. Background noise can keep those events away (speaker mode, 28 Oct: turns
+/// ended 2.7-4.8 s after the last word), so with `sentenceGap` a finalized sentence ends the turn by itself.
+///
+/// Quiet is counted from the newest word: empty results and repeats of the same guess are not new speech.
 public struct Endpointer: Sendable {
     public var finalGap: Double
     public var volatileGap: Double
     public var unfinishedGap: Double
+    /// Quiet after a finalized text ending in `.`, `?` or `!` that ends the turn without a speech-end event;
+    /// nil to wait for `finalGap`.
+    public var sentenceGap: Double?
 
     private var finalized = ""
     private var volatile = ""
     private var lastResultAt = 0.0
     private var endHinted = false
 
-    public init(finalGap: Double = 0.7, volatileGap: Double = 1.5, unfinishedGap: Double = 1.4) {
+    public init(finalGap: Double = 0.7, volatileGap: Double = 1.5, unfinishedGap: Double = 1.4,
+                sentenceGap: Double? = nil) {
         self.finalGap = finalGap
         self.volatileGap = volatileGap
         self.unfinishedGap = unfinishedGap
+        self.sentenceGap = sentenceGap
     }
 
     /// Everything heard so far in this turn.
     public var text: String { Self.join(finalized, volatile) }
 
-    /// `at` is in seconds on any clock that `take(at:)` also uses.
+    /// `at` is when the newest word in `text` ended, or when the result came if the recognizer gives no word
+    /// times, in seconds on any clock that `take(at:)` also uses.
     public mutating func add(_ text: String, isFinal: Bool, at time: Double) {
+        // An empty result is no new speech (Deepgram sends them while it only hears noise): it clears a guess
+        // but must not hold the turn open.
+        guard !text.trimmingCharacters(in: .whitespaces).isEmpty else {
+            volatile = ""
+            return
+        }
         if isFinal {
             finalized = Self.join(finalized, text)
             volatile = ""
         } else {
             volatile = text
             // Talking again after the recognizer said speech ended.
-            if !text.trimmingCharacters(in: .whitespaces).isEmpty { endHinted = false }
+            endHinted = false
         }
-        lastResultAt = time
+        lastResultAt = max(lastResultAt, time)
     }
 
     /// The recognizer says speech ended.
@@ -55,6 +70,8 @@ public struct Endpointer: Sendable {
         let gap: Double
         if endHinted && settled {
             gap = Self.looksUnfinished(all) ? unfinishedGap : 0
+        } else if settled, let sentenceGap, let last = all.last, ".?!".contains(last) {
+            gap = sentenceGap
         } else {
             gap = settled ? finalGap : volatileGap
         }

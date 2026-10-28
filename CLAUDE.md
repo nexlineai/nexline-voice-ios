@@ -95,7 +95,12 @@ Plan, decisions and the feature cut-list are in the vault:
 - Speaker cut-in (build 22): loudness can't be used because the mic hears her. Instead, Deepgram words during
   her reply that aren't in it pause her (`CutInGate.isForeign`: not equal, a letter off, or part of one of her
   words; numbers and words under three letters never count). The gate then confirms as on the phone, with
-  `leadIn` 1.5 s and `echoTail` 0.4 s + `outputLatency`.
+  `leadIn` 1.5 s and `echoTail` 0.4 s + `outputLatency`. When she finishes on a speaker, the next turn drops words that are
+  hers until `echoTail` after she stopped (her late-recognized words had become the user's turn).
+- End of turn (build 23): the Endpointer counts quiet from the newest word's end (Deepgram word times), not from
+  result arrival, and ignores empty results. Both had held turns open until Deepgram's `UtteranceEnd`
+  (2.7-4.8 s on the JBL). A finalized sentence ending in `.`/`?`/`!` ends the turn after 0.8 s of quiet without
+  waiting for `speech_final`.
 - Playback format is 24 kHz mono float; xAI streams 24 kHz 16-bit PCM, decoded to float.
 - Logs use subsystem `com.nexlineai.voice`; read them on Omarchy with `idevicesyslog` over USB. The app keeps the
   last 500 lines: Settings → Diagnostics → Copy log. A Deepgram turn logs how long after the last word it ended

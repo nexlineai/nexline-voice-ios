@@ -198,6 +198,30 @@ final class EndpointerTests: XCTestCase {
         XCTAssertEqual(e.take(at: 2.5), "turn on the")
     }
 
+    func testEmptyResultsDontHoldTheTurnOpen() {
+        var e = Endpointer(finalGap: 1.6, volatileGap: 2.5)
+        e.add("turn on the lights", isFinal: true, at: 1)
+        e.add("", isFinal: false, at: 1.5)
+        e.add("", isFinal: true, at: 2)
+        XCTAssertNil(e.take(at: 2.5))
+        XCTAssertEqual(e.take(at: 2.7), "turn on the lights")
+    }
+
+    func testAFinishedSentenceEndsWithoutTheSpeechEnd() {
+        var e = Endpointer(finalGap: 1.6, volatileGap: 2.5, sentenceGap: 0.8)
+        // `at` is when the last word ended; the same guess repeated later changes nothing.
+        e.add("Count to 10 with pauses", isFinal: false, at: 1)
+        e.add("Count to 10 with pauses between the numbers.", isFinal: false, at: 2)
+        e.add("Count to 10 with pauses between the numbers.", isFinal: false, at: 2)
+        XCTAssertNil(e.take(at: 4))
+        e.add("Count to 10 with pauses between the numbers.", isFinal: true, at: 2)
+        XCTAssertEqual(e.take(at: 4), "Count to 10 with pauses between the numbers.")
+        // A trailing comma still waits for the backstop.
+        e.add("Okay so,", isFinal: true, at: 5)
+        XCTAssertNil(e.take(at: 6))
+        XCTAssertEqual(e.take(at: 6.6), "Okay so,")
+    }
+
     func testTalkingAgainCancelsTheSpeechEnd() {
         var e = Endpointer(finalGap: 1.6, volatileGap: 2.5)
         e.add("Okay so,", isFinal: true, at: 1)

@@ -156,10 +156,10 @@ final class TalkModel: ObservableObject {
     /// When the user's last recognized word ended, and what ended their speech, for the turn-end log line.
     private var lastWordAt: Double?
     private var speechEndedBy: String?
-    /// Her words when she was paused, and after words cut her off there: this turn's words around the pause that
-    /// are hers are her echo.
+    /// Her words when she was paused. After words cut her off there, or after she finished on a speaker (no echo
+    /// cancellation), this turn's words from `from` to `until` that are hers are her echo.
     private var pausedHerWords: Set<String> = []
-    private var echoCut: (at: Double, herWords: Set<String>)?
+    private var echoFilter: (from: Double, until: Double, herWords: Set<String>)?
     /// Carapava and Mamadona keep their history on their own server, so a cut-off reply is only fixed there
     /// by telling them on the next turn what the user heard.
     private var agentCutNote: String?
@@ -534,7 +534,7 @@ final class TalkModel: ObservableObject {
     }
 
     private func beginListening() {
-        echoCut = nil
+        echoFilter = nil
         endpointer.reset()
         hearing = ""
         listeningSince = Self.now
@@ -548,7 +548,7 @@ final class TalkModel: ObservableObject {
         if choice == .deepgram {
             do {
                 // Deepgram says when speech ended; these gaps are only the backstop.
-                endpointer = Endpointer(finalGap: 1.6, volatileGap: 2.5)
+                endpointer = Endpointer(finalGap: 1.6, volatileGap: 2.5, sentenceGap: 0.8)
                 let stream = self.deepgram
                 mic.target = { buffer in stream.feed(buffer) }
                 try deepgram.start(
@@ -663,14 +663,20 @@ final class TalkModel: ObservableObject {
         guard phase == .listening, !muted else { return }
         // Deepgram's results arrive late: one whose audio ended before listening began is Nexa's echo.
         if let endsAt, endsAt < listeningSince { return }
-        // After a cut at a pause, so are its words around the pause that are hers (a result can start with her echo).
+        // So are its words that are hers around a cut, or right after she finished on a speaker (a result can start
+        // with her echo: "I got to three before you cut in" became the user's turn, 28 Oct).
         var text = text
-        if let cut = echoCut {
-            let kept = gate.yours(words, pausedAt: cut.at, herWords: cut.herWords)
+        var kept = words
+        if let filter = echoFilter {
+            kept = words.filter { word in
+                word.end >= filter.until
+                    || (word.end >= filter.from && CutInGate.isForeign(word.text, to: filter.herWords))
+            }
             if kept.count < words.count { text = kept.map(\.text).joined(separator: " ") }
         }
-        if let last = words.last { lastWordAt = last.end }
-        endpointer.add(text, isFinal: isFinal, at: Self.now)
+        if let last = kept.last { lastWordAt = last.end }
+        // Quiet counts from the newest word, so a repeated guess or an empty result doesn't hold the turn open.
+        endpointer.add(text, isFinal: isFinal, at: kept.last?.end ?? Self.now)
         hearing = endpointer.text
     }
 
@@ -729,7 +735,7 @@ final class TalkModel: ObservableObject {
         // The words that confirmed the cut were said after the pause and are this turn's start.
         if let pausedAt {
             listeningSince = pausedAt
-            echoCut = (pausedAt, pausedHerWords)
+            echoFilter = (pausedAt - gate.leadIn, pausedAt + gate.echoTail, pausedHerWords)
         }
         lastLoudAt = now
     }
@@ -885,6 +891,10 @@ final class TalkModel: ObservableObject {
         if standby { openWindow() }
         launchOpenLine()
         beginListening()
+        // On a speaker the mic heard her, and the recognizer can hand her last words over late.
+        if speakerMode, let reply = lines.last(where: { !$0.fromUser })?.text {
+            echoFilter = (-.infinity, Self.now + gate.echoTail, CutInGate.vocabulary(SpeechText.clean(reply)))
+        }
         if let reply = lines.last(where: { !$0.fromUser })?.text { autoplayMedia(in: reply) }
     }
 
