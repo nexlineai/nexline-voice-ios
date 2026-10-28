@@ -108,6 +108,12 @@ Plan, decisions and the feature cut-list are in the vault:
   result arrival, and ignores empty results. Both had held turns open until Deepgram's `UtteranceEnd`
   (2.7-4.8 s on the JBL). A finalized sentence ending in `.`/`?`/`!` ends the turn after 0.8 s of quiet without
   waiting for `speech_final`.
+- Grooveline Radio (build 27): `InlineAudio` plays `https://radio.grooveline.org/auto` (Icecast Ogg Vorbis, 44.1 kHz
+  stereo) with AVPlayer, because Apple added Ogg Vorbis in iOS 18.4. Live means pause drops the connection and
+  play reconnects. No time after 10 s or a failed item logs "radio: the iPhone can't play the stream" and the card
+  opens Chrome. If AVPlayer can't do it, the fallback plan is sbooth's `ogg` 0.1.3 / `vorbis` 0.1.2 xcframeworks
+  (BSD-3, dynamic, with a macOS slice). Their C state must live in allocated pointers (vorbis_dsp keeps `vi`), and
+  the decoder resets on every BOS page (Icecast chains a new stream at each metadata change).
 - Playback format is 24 kHz mono float; xAI streams 24 kHz 16-bit PCM, decoded to float.
 - Logs use subsystem `com.nexlineai.voice`; read them on Omarchy with `idevicesyslog` over USB. The app keeps the
   last 500 lines: Settings → Diagnostics → Copy log. A Deepgram turn logs how long after the last word it ended

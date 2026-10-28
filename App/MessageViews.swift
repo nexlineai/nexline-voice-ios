@@ -521,17 +521,38 @@ private struct Lightbox: View {
 
 // MARK: Radio
 
-/// Grooveline Radio, live. The stream is Ogg, which iOS can't play in-app but Chrome can, so the card shows
-/// what's on air (Icecast status) and opens the site in Chrome. Port of the RN app's RadioCard.
+/// Grooveline Radio, live: what's on air (Icecast status) and a play button. It plays in the app (`InlineAudio`);
+/// if the iPhone can't play the stream, a tap opens the site in Chrome instead. Port of the RN app's RadioCard.
 struct RadioCard: View {
+    @ObservedObject private var audio = InlineAudio.shared
     @State private var nowPlaying: String?
     @State private var listeners: Int?
 
     private static let status = URL(string: "https://radio.grooveline.org/status-json.xsl")!
 
+    private var state: InlineAudio.State { audio.state(for: InlineAudio.radioStream) }
+
+    private var line: String {
+        switch state {
+        case .playing: return nowPlaying ?? "playing"
+        case .loading, .warming: return "connecting…"
+        case .failed: return "tap to listen in Chrome"
+        case .idle, .paused: return nowPlaying ?? "tap to listen"
+        }
+    }
+
     var body: some View {
         Button {
-            if let chrome = AppLink(key: "chrome", query: "https://grooveline.org") { AppLauncher.open(chrome) }
+            switch state {
+            case .failed:
+                if let chrome = AppLink(key: "chrome", query: "https://grooveline.org") { AppLauncher.open(chrome) }
+            case .playing:
+                audio.pause()
+            case .loading, .warming:
+                break
+            case .idle, .paused:
+                audio.play(url: InlineAudio.radioStream, kind: .radio)
+            }
         } label: {
             HStack(spacing: 12) {
                 Image(systemName: "dot.radiowaves.left.and.right")
@@ -545,14 +566,16 @@ struct RadioCard: View {
                         Text("Grooveline Radio").font(.subheadline.weight(.semibold)).foregroundStyle(Theme.text)
                         Text("LIVE").font(Theme.mono(9, weight: .bold)).foregroundStyle(Theme.coral)
                     }
-                    Text(nowPlaying ?? "tap to listen in Chrome")
+                    Text(line)
                         .font(.caption).foregroundStyle(Theme.muted).lineLimit(1)
                     if let listeners {
                         Text("\(listeners) listening").font(Theme.mono(10)).foregroundStyle(Theme.faint)
                     }
                 }
                 Spacer(minLength: 0)
-                Image(systemName: "arrow.up.right").font(.caption).foregroundStyle(Theme.muted)
+                Image(systemName: state == .failed ? "arrow.up.right"
+                      : state == .playing ? "pause.fill" : "play.fill")
+                    .font(.caption).foregroundStyle(Theme.muted)
             }
             .padding(12)
             .frame(minWidth: 230)
@@ -568,17 +591,29 @@ struct RadioCard: View {
     }
 
     private func refresh() async {
-        guard let result = try? await URLSession.shared.data(from: Self.status),
+        guard let mount = await Self.mount() else { return }
+        nowPlaying = Self.text(mount)
+        listeners = mount["listeners"] as? Int
+    }
+
+    /// What's on air now, for the lock screen too.
+    static func currentTitle() async -> String? {
+        await mount().flatMap(text)
+    }
+
+    private static func mount() async -> [String: Any]? {
+        guard let result = try? await URLSession.shared.data(from: status),
               let json = try? JSONSerialization.jsonObject(with: result.0) as? [String: Any],
               let stats = json["icestats"] as? [String: Any]
-        else { return }
+        else { return nil }
         let sources = (stats["source"] as? [[String: Any]]) ?? ((stats["source"] as? [String: Any]).map { [$0] } ?? [])
-        guard let mount = sources.first(where: { ($0["listenurl"] as? String ?? "").contains("/auto") }) ?? sources.first
-        else { return }
+        return sources.first(where: { ($0["listenurl"] as? String ?? "").contains("/auto") }) ?? sources.first
+    }
+
+    private static func text(_ mount: [String: Any]) -> String? {
         let artist = mount["artist"] as? String ?? ""
         let title = mount["title"] as? String ?? ""
         let text = !artist.isEmpty && !title.isEmpty ? "\(artist) – \(title)" : (title.isEmpty ? artist : title)
-        nowPlaying = text.isEmpty ? nil : text
-        listeners = mount["listeners"] as? Int
+        return text.isEmpty ? nil : text
     }
 }

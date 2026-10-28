@@ -41,9 +41,11 @@ public enum MediaKind: String, Sendable {
     }
 
     /// Track-level Mixcloud/SoundCloud links play inline through serve.py's stream proxy; profiles, sets and
-    /// service pages keep the plain link card.
+    /// service pages keep the plain link card. Grooveline Radio plays inline too (its live stream).
     public static func playsInline(_ url: String, _ kind: MediaKind) -> Bool {
         switch kind {
+        case .radio:
+            return true
         case .mixcloud:
             return url.matches(#"(?:https?://)?(?:www\.)?mixcloud\.com/(?!(?:widget|live|categories|search|discover|upload|premium|pro|settings|about|developers)\b)[A-Za-z0-9_.%-]+/[A-Za-z0-9_.%()!-]+"#)
         case .soundcloud:

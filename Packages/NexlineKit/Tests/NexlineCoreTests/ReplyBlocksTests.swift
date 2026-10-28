@@ -66,6 +66,7 @@ final class ReplyBlocksTests: XCTestCase {
         XCTAssertFalse(MediaKind.playsInline("https://www.mixcloud.com/discover/house/", .mixcloud))
         XCTAssertTrue(MediaKind.playsInline("https://soundcloud.com/artist/track", .soundcloud))
         XCTAssertFalse(MediaKind.playsInline("https://soundcloud.com/artist/sets/x", .soundcloud))
+        XCTAssertTrue(MediaKind.playsInline("https://radio.grooveline.org/auto", .radio))
     }
 
     func testCameraDeviceAndCode() {

@@ -9,9 +9,15 @@ import SwiftUI
 ///
 /// One mix plays at a time. Voice processing gates music to near silence, so voice stops while a mix plays and
 /// starts again when it stops or is paused. Lock screen and Control Center show it and can pause it.
+///
+/// Grooveline Radio plays here too, straight from Icecast. The stream is Ogg Vorbis, which iOS plays since 18.4
+/// (Safari 18.4 release notes; build 27 is the first test of AVPlayer with it). If the player can't, the card
+/// falls back to Chrome and the log says why.
 @MainActor
 final class InlineAudio: ObservableObject {
     static let shared = InlineAudio()
+    /// The one live stream every Grooveline Radio link means.
+    static let radioStream = URL(string: "https://radio.grooveline.org/auto")!
 
     enum State: Equatable {
         case idle, warming, loading, playing, paused, failed
@@ -41,6 +47,7 @@ final class InlineAudio: ObservableObject {
     private var autoplayed: Set<URL> = []
     private var holdsVoice = false
     private var artwork: MPMediaItemArtwork?
+    private var radioStartedAt: Date?
 
     private init() {
         let center = MPRemoteCommandCenter.shared()
@@ -70,6 +77,7 @@ final class InlineAudio: ObservableObject {
 
     /// `autoplay` starts a mix only the first time it arrives, never when history scrolls by again.
     func play(url: URL, kind: MediaKind, autoplay: Bool = false) {
+        let url = kind == .radio ? Self.radioStream : url
         if autoplay {
             guard !autoplayed.contains(url) else { return }
             autoplayed.insert(url)
@@ -101,13 +109,18 @@ final class InlineAudio: ObservableObject {
 
     func pause() {
         guard state == .playing, let player else { return }
-        player.pause()
+        // Live: pausing would resume stale audio later, so drop the connection and reconnect on play.
+        if kind == .radio { teardown() } else { player.pause() }
         state = .paused
         updateNowPlaying()
         Task { await releaseVoice() }
     }
 
     func resume() {
+        if kind == .radio, state == .paused, let url {
+            play(url: url, kind: .radio)
+            return
+        }
         guard state == .paused, let player else { return }
         state = .playing
         Task {
@@ -154,6 +167,10 @@ final class InlineAudio: ObservableObject {
     private func start(_ url: URL, _ mine: Int) async {
         await holdVoice()
         guard mine == session else { return }
+        if kind == .radio {
+            startRadio(url)
+            return
+        }
         let query = [URLQueryItem(name: "url", value: url.absoluteString), URLQueryItem(name: "audio", value: "1")]
         // Ask before handing the URL to the player: a cache miss makes the Jetson download first, and AVPlayer
         // would report that as an opaque error. Monster mixes get the server's 15-minute download budget.
@@ -197,10 +214,40 @@ final class InlineAudio: ObservableObject {
         updateNowPlaying()
     }
 
+    private func startRadio(_ url: URL) {
+        activateSession()
+        let item = AVPlayerItem(url: url)
+        let player = AVPlayer(playerItem: item)
+        self.player = player
+        radioStartedAt = Date()
+        timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.5, preferredTimescale: 600),
+                                                      queue: .main) { [weak self] time in
+            Task { @MainActor in self?.tick(time, item) }
+        }
+        observers.append(NotificationCenter.default.addObserver(
+            forName: AVPlayerItem.failedToPlayToEndTimeNotification, object: item, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.failed() }
+        })
+        player.play()
+        updateNowPlaying()
+    }
+
     private func tick(_ time: CMTime, _ item: AVPlayerItem) {
         guard item === player?.currentItem else { return }
         if item.status == .failed {
             failed()
+            return
+        }
+        if kind == .radio {
+            // Live: playing once time moves; nothing after 10 s means the player can't take the stream.
+            if time.seconds > 0.2, state == .loading {
+                state = .playing
+                talk?.musicNote("radio: playing in the app")
+                updateNowPlaying()
+            } else if state == .loading, let started = radioStartedAt, Date().timeIntervalSince(started) > 10 {
+                failed()
+            }
             return
         }
         position = time.seconds.isFinite ? time.seconds : 0
@@ -221,6 +268,10 @@ final class InlineAudio: ObservableObject {
     }
 
     private func failed() {
+        if kind == .radio {
+            let why = player?.currentItem?.error?.localizedDescription ?? "no audio after 10 s"
+            talk?.musicNote("radio: the iPhone can't play the stream (\(why)), the card opens Chrome")
+        }
         teardown()
         state = .failed
         Task { await releaseVoice() }
@@ -233,6 +284,7 @@ final class InlineAudio: ObservableObject {
         observers = []
         player?.pause()
         player = nil
+        radioStartedAt = nil
     }
 
     // MARK: Sharing the audio session with voice
@@ -266,6 +318,7 @@ final class InlineAudio: ObservableObject {
             MPMediaItemPropertyArtist: info?.channel ?? kind.label,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: position,
             MPNowPlayingInfoPropertyPlaybackRate: state == .playing ? 1.0 : 0.0,
+            MPNowPlayingInfoPropertyIsLiveStream: kind == .radio,
         ]
         if duration > 0 { now[MPMediaItemPropertyPlaybackDuration] = duration }
         if let artwork { now[MPMediaItemPropertyArtwork] = artwork }
@@ -299,6 +352,9 @@ final class InlineAudio: ObservableObject {
     }
 
     private static func fetchMeta(_ url: URL, _ kind: MediaKind) async -> Meta? {
+        if kind == .radio {
+            return Meta(title: await RadioCard.currentTitle() ?? "Live", channel: "Grooveline Radio", art: nil, duration: 0)
+        }
         if kind == .mixcloud {
             let path = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             guard !path.isEmpty, let api = URL(string: "https://api.mixcloud.com/\(path)/"),

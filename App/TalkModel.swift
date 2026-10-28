@@ -301,6 +301,11 @@ final class TalkModel: ObservableObject {
 
     /// A mix needs the audio session without voice processing (it gates music to near silence), so voice stops
     /// while it plays and starts again after.
+    /// A line in the log from the music player.
+    func musicNote(_ text: String) {
+        note(text)
+    }
+
     func pauseForMusic() async {
         guard phase != .off else { return }
         resumeVoiceAfterMusic = true
