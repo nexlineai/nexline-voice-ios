@@ -150,6 +150,8 @@ final class TalkModel: ObservableObject {
     /// When the user's last recognized word ended, and what ended their speech, for the turn-end log line.
     private var lastWordAt: Double?
     private var speechEndedBy: String?
+    /// After words cut her off at a pause: words of this turn that ended before the pause are her echo.
+    private var echoCutoff: Double?
     /// Carapava and Mamadona keep their history on their own server, so a cut-off reply is only fixed there
     /// by telling them on the next turn what the user heard.
     private var agentCutNote: String?
@@ -495,6 +497,7 @@ final class TalkModel: ObservableObject {
     }
 
     private func beginListening() {
+        echoCutoff = nil
         endpointer.reset()
         hearing = ""
         listeningSince = Self.now
@@ -562,7 +565,7 @@ final class TalkModel: ObservableObject {
         let speech = detector.process(levelDB: block.levelDB, durationMs: block.durationMs, playing: shielded,
                                       strict: strict)
         if paused {
-            act(gate.level(loud: block.levelDB > detector.threshold(playing: false), at: now), at: now)
+            act(gate.level(loud: !muted && block.levelDB > detector.threshold(playing: false), at: now), at: now)
             return
         }
         if speech && phase == .speaking && bargeInOn && !muted {
@@ -604,14 +607,14 @@ final class TalkModel: ObservableObject {
 
     private func recognized(_ text: String, isFinal: Bool, endsAt: Double?, words: [HeardWord] = []) {
         // While she is paused for a sound, words decide it; if they cut her off, this result starts the turn.
-        if gate.isPaused { act(gate.heard(words), at: Self.now) }
+        if gate.isPaused && !muted { act(gate.heard(words), at: Self.now) }
         guard phase == .listening, !muted else { return }
         // Deepgram's results arrive late: one whose audio ended before listening began is Nexa's echo.
         if let endsAt, endsAt < listeningSince { return }
-        // So are its words that ended before then (a result that confirmed a cut-in can start with her echo).
+        // After a cut at a pause, so are its words that ended before the pause (the result can start with her echo).
         var text = text
-        if let first = words.first, first.end < listeningSince {
-            text = words.filter { $0.end >= listeningSince }.map(\.text).joined(separator: " ")
+        if let cutoff = echoCutoff, let first = words.first, first.end < cutoff {
+            text = words.filter { $0.end >= cutoff }.map(\.text).joined(separator: " ")
         }
         if let last = words.last { lastWordAt = last.end }
         endpointer.add(text, isFinal: isFinal, at: Self.now)
@@ -661,14 +664,18 @@ final class TalkModel: ObservableObject {
     /// `pausedAt`: she was paused for the sound then, so that's where she stopped.
     private func cutIn(at pausedAt: Double? = nil) {
         let now = Self.now
-        let moment = pausedAt ?? now
+        // A typed message or the music hand-off can cut in while she is paused: she stopped at the pause.
+        let moment = pausedAt ?? gate.pausedAt ?? now
         let heard = timeline.heard(at: moment)
         let complete = timeline.fullyPlayed(at: moment) && !replyOpen && pending.isEmpty
         cutReply(report: !complete, heard: heard)
         note(complete ? "you talked as she finished" : "you cut in after: \"\(heard)\"")
         beginListening()
         // The words that confirmed the cut were said after the pause and are this turn's start.
-        if let pausedAt { listeningSince = pausedAt }
+        if let pausedAt {
+            listeningSince = pausedAt
+            echoCutoff = pausedAt
+        }
         lastLoudAt = now
     }
 
