@@ -94,8 +94,9 @@ Plan, decisions and the feature cut-list are in the vault:
   cancellation.
 - Speaker cut-in (build 22): loudness can't be used because the mic hears her. Instead, Deepgram words during
   her reply that aren't in it pause her (`CutInGate.isForeign`: not equal, a letter off, or part of one of her
-  words; numbers and words under three letters never count). The gate then confirms as on the phone, with
-  `leadIn` 1.5 s and `echoTail` 0.4 s + `outputLatency`. When she finishes on a speaker, the next turn drops words that are
+  words; numbers and words under three letters never count). Two such words pause her, because one can be her
+  own word misheard. The gate then confirms as on the phone, with `leadIn` 1.5 s and `echoTail` at least 1.5 s:
+  the JBL keeps playing after a pause for longer than iOS reports. When she finishes on a speaker, the next turn drops words that are
   hers until `echoTail` after she stopped (her late-recognized words had become the user's turn).
 - End of turn (build 23): the Endpointer counts quiet from the newest word's end (Deepgram word times), not from
   result arrival, and ignores empty results. Both had held turns open until Deepgram's `UtteranceEnd`

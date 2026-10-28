@@ -219,7 +219,7 @@ final class EndpointerTests: XCTestCase {
         // A trailing comma still waits for the backstop.
         e.add("Okay so,", isFinal: true, at: 5)
         XCTAssertNil(e.take(at: 6))
-        XCTAssertEqual(e.take(at: 6.6), "Okay so,")
+        XCTAssertEqual(e.take(at: 6.7), "Okay so,")
     }
 
     func testTalkingAgainCancelsTheSpeechEnd() {

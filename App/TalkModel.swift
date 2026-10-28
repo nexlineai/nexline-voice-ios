@@ -498,9 +498,10 @@ final class TalkModel: ObservableObject {
                     try engine.configureSession(Self.setup)
                     try engine.start(voiceProcessing: false)
                     speakerMode = true
-                    // Words reach the recognizer late, and her voice keeps playing for the speaker's latency.
+                    // Words reach the recognizer late, and her voice keeps coming out of a speaker for longer than
+                    // iOS says (the JBL's late words cut her off with 0.4 s + its reported latency, 28 Oct).
                     gate.leadIn = 1.5
-                    gate.echoTail = 0.4 + AVAudioSession.sharedInstance().outputLatency
+                    gate.echoTail = max(1.5, 0.4 + AVAudioSession.sharedInstance().outputLatency)
                     note("\(speaker) only plays music: echo cancellation off so she plays there; words that aren't hers stop her")
                 }
             }
@@ -653,7 +654,8 @@ final class TalkModel: ObservableObject {
             let script = lines.last(where: { !$0.fromUser }).map { SpeechText.clean($0.text) } ?? ""
             let herWords = CutInGate.vocabulary(script)
             let yours = words.filter { $0.end > turnEndedAt && CutInGate.isForeign($0.text, to: herWords) }
-            if !yours.isEmpty {
+            // Two words: one can be her own, misheard ("Grooveline's" cut her off on the JBL, 28 Oct).
+            if yours.count >= 2 {
                 note("words over her on the speaker: \"\(yours.map(\.text).joined(separator: " "))\"")
                 gate.pause(at: Self.now, herText: script)
                 pausedHerWords = gate.herWords

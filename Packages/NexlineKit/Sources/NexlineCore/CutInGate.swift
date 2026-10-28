@@ -95,22 +95,24 @@ public struct CutInGate: Sendable {
     }
 
     /// True when `word` can't be one of `herWords` as the recognizer may have written it. A word counts as hers
-    /// when it's equal, a letter off (two for long words), or part of one ("light" in "lighthouse"). Numbers and
-    /// words under three letters never count against her: the recognizer writes those its own way ("1" for "one",
-    /// "I am" for "I'm").
+    /// when it's equal, the start or end of a longer one of hers ("mix" of "mixcloud"), part of one or containing
+    /// one from four letters ("light" in "lighthouse"), or a letter off from six letters (two from eight).
+    /// Numbers and words under three letters never count against her: the recognizer writes those its own way
+    /// ("1" for "one", "I am" for "I'm").
     public static func isForeign(_ word: String, to herWords: Set<String>) -> Bool {
         let w = normalized(word)
         guard w.count >= 3, !w.allSatisfy(\.isNumber) else { return false }
-        return !herWords.contains { matches(w, $0) }
+        return !herWords.contains { matches(heard: w, hers: $0) }
     }
 
-    static func matches(_ a: String, _ b: String) -> Bool {
-        if a == b { return true }
-        let shorter = min(a.count, b.count)
-        let longer = max(a.count, b.count)
-        if shorter >= 4 && (a.contains(b) || b.contains(a)) { return true }
-        let allowed = longer >= 8 ? 2 : (shorter >= 4 ? 1 : 0)
-        return allowed > 0 && longer - shorter <= allowed && distance(Array(a), Array(b)) <= allowed
+    static func matches(heard w: String, hers h: String) -> Bool {
+        if w == h { return true }
+        if h.count > w.count && (h.hasPrefix(w) || h.hasSuffix(w)) { return true }
+        let shorter = min(w.count, h.count)
+        let longer = max(w.count, h.count)
+        if shorter >= 4 && (w.contains(h) || h.contains(w)) { return true }
+        let allowed = shorter >= 8 ? 2 : (shorter >= 6 ? 1 : 0)
+        return allowed > 0 && longer - shorter <= allowed && distance(Array(w), Array(h)) <= allowed
     }
 
     /// Edit distance (insertions, deletions, substitutions).

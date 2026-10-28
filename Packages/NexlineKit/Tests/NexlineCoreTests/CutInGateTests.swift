@@ -60,6 +60,11 @@ final class CutInGateTests: XCTestCase {
         XCTAssertFalse(CutInGate.isForeign("no", to: her))          // nor words under three letters
         XCTAssertTrue(CutInGate.isForeign("stop", to: her))
         XCTAssertTrue(CutInGate.isForeign("Wait,", to: her))
+        // Short words of hers don't swallow longer words of yours, and a near spelling needs six letters.
+        let short = CutInGate.vocabulary("the mixcloud there")
+        XCTAssertFalse(CutInGate.isForeign("mix", to: short))
+        XCTAssertTrue(CutInGate.isForeign("other", to: short))
+        XCTAssertTrue(CutInGate.isForeign("where", to: short))
     }
 
     func testOnASpeakerHerLateWordsDontCutButYoursDo() {
