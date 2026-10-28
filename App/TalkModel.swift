@@ -80,6 +80,8 @@ final class TalkModel: ObservableObject {
     @Published private(set) var musicListening = false
     private var resumeMusicAfterReply = false
     private var musicResumeAt = 0.0
+    /// Her name showed up in what's being heard: the music is held so the turn can end (lyrics keep it open).
+    private var musicHeldForName = false
     /// "first audio 1.2 s" for the voice screen's debug line.
     @Published private(set) var lastTiming: String?
     /// Her voice and the mic level, read by the voice screen every frame (not published).
@@ -329,9 +331,27 @@ final class TalkModel: ObservableObject {
         await start()
     }
 
-    /// Her name over the music: hold the music and start voice as usual for this turn.
-    private func wakeFromMusic(_ text: String) {
-        note("music: heard you, holding it")
+    /// Over music, lyrics pile into the same turn ahead of the user ("baby I love you Nexa what time is it"), so her
+    /// name counts anywhere and the turn starts there. Only her real name: the misheard variants the standby gate
+    /// also takes ("next", "mama") are everyday lyrics.
+    private func musicWake(_ text: String) -> String? {
+        let canonical = bot.name.lowercased().filter(\.isLetter)
+        let names = Set(bot.wakeNames.filter { $0.filter(\.isLetter) == canonical })
+        let tokens = text.split(whereSeparator: \.isWhitespace).map(String.init)
+        let words = tokens.map { $0.lowercased().filter { $0.isLetter || $0.isNumber } }
+        for i in words.indices {
+            let pair = i + 1 < words.count ? words[i] + " " + words[i + 1] : ""
+            if names.contains(words[i]) || names.contains(pair) {
+                return tokens[i...].joined(separator: " ")
+            }
+        }
+        return nil
+    }
+
+    /// Her name over the music (or a typed message): hold the music and start voice as usual for this turn.
+    private func wakeFromMusic(_ text: String, photo: Data? = nil) {
+        note("music: answering")
+        musicHeldForName = false
         InlineAudio.shared.pauseForVoice()
         resumeVoiceAfterMusic = false
         pausedForMusic = false
@@ -340,16 +360,15 @@ final class TalkModel: ObservableObject {
             await self.stop()
             await self.start()
             guard self.phase == .listening else { return }
-            self.send(text)
+            self.send(text, photo: photo)
         }
     }
 
     /// Standby lets a sentence through when it starts with her name ("Hey Nexa, …"), or while the conversation
     /// window from the last one is still open.
     private func admits(_ text: String) -> Bool {
-        // Over music only her name counts (lyrics, the room), with no conversation window.
-        guard standby || musicListening else { return true }
-        if !musicListening && Self.now < windowUntil {
+        guard standby else { return true }
+        if Self.now < windowUntil {
             openWindow()
             return true
         }
@@ -463,7 +482,11 @@ final class TalkModel: ObservableObject {
         case .listening:
             endpointer.reset()
             hearing = ""
-            send(text, photo: jpeg)
+            if musicListening {
+                wakeFromMusic(text, photo: jpeg)
+            } else {
+                send(text, photo: jpeg)
+            }
         case .thinking, .speaking:
             cutIn()
             endpointer.reset()
@@ -578,6 +601,7 @@ final class TalkModel: ObservableObject {
         hearing = ""
         speakerMode = false
         musicListening = false
+        musicHeldForName = false
         phase = .off
     }
 
@@ -743,6 +767,11 @@ final class TalkModel: ObservableObject {
         // Quiet counts from the newest word, so a repeated guess or an empty result doesn't hold the turn open.
         endpointer.add(text, isFinal: isFinal, at: kept.last?.end ?? Self.now)
         hearing = endpointer.text
+        if musicListening && !musicHeldForName && musicWake(endpointer.text) != nil {
+            musicHeldForName = true
+            note("music: heard your name, holding it")
+            InlineAudio.shared.pauseForVoice()
+        }
     }
 
     private func speechEnded(by event: String) {
@@ -783,12 +812,21 @@ final class TalkModel: ObservableObject {
                 note("ignored, the mic never heard you loud enough (echo?): \"\(text)\"")
                 return
             }
-            guard admits(text) else {
-                note("\(musicListening ? "music" : "standby"), not for \(bot.name): \"\(text)\"")
+            if musicListening {
+                guard let wake = musicWake(text) else {
+                    note("music, not for \(bot.name): \"\(text)\"")
+                    // The name was only in a guess the recognizer took back: the music comes back.
+                    if musicHeldForName {
+                        musicHeldForName = false
+                        InlineAudio.shared.resume()
+                    }
+                    return
+                }
+                wakeFromMusic(wake)
                 return
             }
-            if musicListening {
-                wakeFromMusic(text)
+            guard admits(text) else {
+                note("standby, not for \(bot.name): \"\(text)\"")
                 return
             }
             send(text)

@@ -54,7 +54,7 @@ Plan, decisions and the feature cut-list are in the vault:
   commands, photo attach, live mode), `VoiceModeView` (`AuraOrb`: Canvas particle halo + bars driven by
   `VoiceLevels` = her queued audio's RMS windows and the mic level; mute, standby, end), `DevicesView` +
   `HomeStore`/`CameraFrame`/`HADeviceCard` (serve.py `/ha/*`), `InlineAudio` (+ `AudioCard`, `NowPlayingBar`:
-  serve.py `/youtube/stream` proxy, 503 = warming, lock-screen controls; voice pauses while a mix plays),
+  serve.py `/youtube/stream` proxy, 503 = warming, lock-screen controls; while music plays voice only listens for her name, see Music listening),
   `SettingsView` (per-agent engine/voice with preview, model override, keys), `Intents` (App Shortcut "Talk to
   Nexa"), `Router` (navigation, voice cover, `nexlinevoice://voice|chat|home/<bot>`).
 - One `TalkModel` for the whole app (created in `NexlineVoiceApp`): two voice-processing engines would fight. Agents
@@ -109,8 +109,11 @@ Plan, decisions and the feature cut-list are in the vault:
   (2.7-4.8 s on the JBL). A finalized sentence ending in `.`/`?`/`!` ends the turn after 0.8 s of quiet without
   waiting for `speech_final`.
 - Music listening (build 28): while a mix or the radio plays, voice runs `start(musicEars: true)` (voice
-  processing off, which would squash the music; same play-and-record session). Only turns that start with her
-  name count, with no conversation window. "Nexa, …" → `InlineAudio.pauseForVoice()`, then a normal voice start
+  processing off, which would squash the music; same play-and-record session). Only turns with her real name
+  count (anywhere in the turn, since lyrics pile up ahead of it; not the misheard standby variants like "next"
+  or "mama"), with no conversation window. Her name in the turn being heard holds the music at once, so the
+  turn can end; if the name was only in a guess that was taken back, the music resumes. A typed message holds
+  the music the same way. "Nexa, …" → `InlineAudio.pauseForVoice()`, then a normal voice start
   answers the turn. 6 s after her reply with nothing said, `InlineAudio.resume()` brings the music back.
   `InlineAudio.activateSession` keeps voice's session while `musicListening`.
 - Grooveline Radio (build 27): `InlineAudio` plays `https://radio.grooveline.org/auto` (Icecast Ogg Vorbis, 44.1 kHz
