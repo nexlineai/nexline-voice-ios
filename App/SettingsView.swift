@@ -166,7 +166,8 @@ struct SettingsView: View {
         case .iphone: return "On the iPhone, works offline."
         case .whisper:
             return "Whisper on Nexa's Jetson, only while it runs there: the iPhone hears when you finish, Whisper writes "
-                + "the words (the iPhone's if Whisper is off). Carapava, Mamadona, music and Dutch use Deepgram."
+                + "the words (the iPhone's if Whisper is off). Carapava, Mamadona, music, a Bluetooth speaker and Dutch "
+                + "use Deepgram."
         }
     }
 

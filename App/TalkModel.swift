@@ -629,9 +629,11 @@ final class TalkModel: ObservableObject {
         var choice = choice
         if choice == .whisper {
             // Whisper runs on Nexa's Jetson. Music would reach it as words (build 29's music listening stays on
-            // Deepgram), and the iPhone's recognizer has no Dutch to end the turn with.
+            // Deepgram). On a speaker the mic hears her, and only Deepgram's word times tell her echo from the user
+            // (build 22). The iPhone's recognizer has no Dutch to end the turn with.
             let reason: String? = bot != .nexa ? "Whisper is Nexa's"
                 : musicListening ? "music is playing"
+                : speakerMode ? "on a speaker only Deepgram tells her echo from you"
                 : SpeechLanguage.current == .nl ? "the iPhone can't end a Dutch turn" : nil
             if let reason {
                 note("listening: \(reason), Deepgram listens")

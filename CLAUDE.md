@@ -77,7 +77,7 @@ Plan, decisions and the feature cut-list are in the vault:
   same mic buffers (16 kHz Int16, last 40 s). After the standby check, the turn's audio (from 2.5 s before the first
   result) goes to serve.py `/phone/transcribe` (the Jetson's whisper.cpp, base64 WAV in JSON, prompt = the Deepgram
   keyterms), and Whisper's text is what gets sent. The iPhone's text is kept when Whisper is off, fails or hears no
-  words. Carapava/Mamadona, music listening and Dutch use Deepgram instead. Cut-in is the iPhone's instant cut. The
+  words. Carapava/Mamadona, music listening, speaker mode (her echo) and Dutch use Deepgram instead. Cut-in is the iPhone's instant cut. The
   app never starts Whisper.
 - Enabling voice processing changes the IO formats while the engine is set up, so the engine starts with a
   configuration change pending and stops itself right away (spike builds 1-3). Fixed in build 4: resume the same
