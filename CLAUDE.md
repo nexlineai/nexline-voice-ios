@@ -9,6 +9,9 @@ Plan, decisions and the feature cut-list are in the vault:
 - **No keys in the binary or the repo.** API keys are entered on the phone and stored in the Keychain.
 - **The signing key exists only in the `testflight` environment** (maintainer approval, `v*` tags).
   No repo-level secrets, ever. Never use `pull_request_target`.
+- **No hardcoded words to fix a mishearing** (Zé, 28 Oct). This is a production app sold with the kiosk, so personal
+  names or extra keyterms never get baked in. The ZDB and service-name keyterms of builds 15-17 were removed in 18.
+  Fix recognition at the STT or settings level.
 - Check `.github/workflows/` before every push (exfil-workflow history on other repos).
 - Commits use `58702721+nexlineai@users.noreply.github.com` (set in this clone's git config).
 - Nothing builds on Omarchy (no Xcode, and too little disk for a Swift toolchain). CI is the compiler.
