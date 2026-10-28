@@ -18,24 +18,24 @@ public struct HeardWord: Equatable, Sendable {
 /// cut her off, and a sound that brings no words lets her carry on from where she paused.
 ///
 /// A word counts when it ends around the pause or later and isn't one of hers (her echo, recognized late), or
-/// when it ends well after the pause, when she is silent. Sound that goes on for `sustainedCut` cuts without
-/// words, so speech the recognizer can't transcribe (another language) still gets through.
+/// when it ends well after the pause, when she is silent. Sound without words never cuts her: after `maxPause`
+/// she carries on. The 28 Oct radio test cut her three times on music with a "1 s of sound cuts" rule.
 public struct CutInGate: Sendable {
     public enum Action: Equatable, Sendable {
         /// Not decided yet (or not paused).
         case wait
-        /// Carry on. `pausedAt` is when she was paused.
-        case resume(pausedAt: Double)
+        /// Carry on. `pausedAt` is when she was paused; `background` when sound went on without words.
+        case resume(pausedAt: Double, background: Bool)
         /// The user is talking: cut her off as of `pausedAt`. `words` is what confirmed it, nil for sound alone.
         case cut(pausedAt: Double, words: String?)
     }
 
     /// Quiet this long, with no words, and she carries on.
     public var resumeAfter = 1.0
-    /// Sound this long, words or not, and she stops.
-    public var sustainedCut = 1.0
-    /// A dip shorter than this doesn't end a stretch of sound (the gaps between syllables).
-    public var gapTolerance = 0.3
+    /// Paused this long without words, even with sound going on (music, a radio), and she carries on.
+    public var maxPause = 1.5
+    /// Words it takes to cut her off (2 in a noisy room, where a radio's single word got through).
+    public var minWords = 1
     /// Words ending this soon before the pause may be the user's first words.
     public var leadIn = 0.5
     /// Her echo can't end later than this after the pause, so any word ending later is the user's.
@@ -45,7 +45,6 @@ public struct CutInGate: Sendable {
     /// Her words while paused, to tell her echo from the user.
     public private(set) var herWords: Set<String> = []
     private var lastLoudAt = 0.0
-    private var loudSince = 0.0
 
     public init() {}
 
@@ -56,19 +55,14 @@ public struct CutInGate: Sendable {
         pausedAt = time
         herWords = Self.vocabulary(herText)
         lastLoudAt = time
-        loudSince = time
     }
 
     /// Every mic block while paused. `loud` means the block is over the line for the user's voice.
     public mutating func level(loud: Bool, at time: Double) -> Action {
         guard let pausedAt else { return .wait }
-        if loud {
-            if time - lastLoudAt > gapTolerance { loudSince = time }
-            lastLoudAt = time
-            if time - loudSince >= sustainedCut { return finish(.cut(pausedAt: pausedAt, words: nil)) }
-            return .wait
-        }
-        if time - lastLoudAt >= resumeAfter { return finish(.resume(pausedAt: pausedAt)) }
+        if loud { lastLoudAt = time }
+        if time - pausedAt >= maxPause { return finish(.resume(pausedAt: pausedAt, background: true)) }
+        if !loud && time - lastLoudAt >= resumeAfter { return finish(.resume(pausedAt: pausedAt, background: false)) }
         return .wait
     }
 
@@ -76,7 +70,7 @@ public struct CutInGate: Sendable {
     public mutating func heard(_ words: [HeardWord]) -> Action {
         guard let pausedAt else { return .wait }
         let yours = self.yours(words, pausedAt: pausedAt, herWords: herWords)
-        guard !yours.isEmpty else { return .wait }
+        guard yours.count >= minWords else { return .wait }
         return finish(.cut(pausedAt: pausedAt, words: yours.map(\.text).joined(separator: " ")))
     }
 

@@ -19,6 +19,8 @@ public struct Endpointer: Sendable {
     /// Quiet after a finalized text ending in `.`, `?` or `!` that ends the turn without a speech-end event;
     /// nil to wait for `finalGap`.
     public var sentenceGap: Double?
+    /// The same for a guess that was never finalized; nil to wait for `volatileGap`.
+    public var guessSentenceGap: Double?
 
     private var finalized = ""
     private var volatile = ""
@@ -26,11 +28,12 @@ public struct Endpointer: Sendable {
     private var endHinted = false
 
     public init(finalGap: Double = 0.7, volatileGap: Double = 1.5, unfinishedGap: Double = 1.4,
-                sentenceGap: Double? = nil) {
+                sentenceGap: Double? = nil, guessSentenceGap: Double? = nil) {
         self.finalGap = finalGap
         self.volatileGap = volatileGap
         self.unfinishedGap = unfinishedGap
         self.sentenceGap = sentenceGap
+        self.guessSentenceGap = guessSentenceGap
     }
 
     /// Everything heard so far in this turn.
@@ -72,6 +75,8 @@ public struct Endpointer: Sendable {
             gap = Self.looksUnfinished(all) ? unfinishedGap : 0
         } else if settled, let sentenceGap, let last = all.last, ".?!".contains(last) {
             gap = sentenceGap
+        } else if !settled, let guessSentenceGap, let last = all.last, ".?!".contains(last) {
+            gap = guessSentenceGap
         } else {
             gap = settled ? finalGap : volatileGap
         }

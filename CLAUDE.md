@@ -84,10 +84,14 @@ Plan, decisions and the feature cut-list are in the vault:
   settles. The first spoken piece is at least 10 characters.
 - Cut-in (build 19, `CutInGate`): with Deepgram, a sound over her voice only pauses playback (`pausePlayback`
   keeps the queue). Words with Deepgram word times that end after the pause, or near it and not hers, cut her
-  off as of the pause. So does 1 s of sound without words. 1 s of quiet with no words and she carries on: the
+  off as of the pause. Sound without words never cuts (build 26: the radio did, three times); after 1.5 s
+  paused she carries on and the room counts as noisy. 1 s of quiet with no words and she carries on: the
   timeline, levels, `playbackEnd` and settling all move by the pause, with 1 s strict after. The iPhone
   recognizer has no word times, so it still cuts at once. The log says "sound over her", then "carried on" or
   "cut off by your words".
+- Noisy room (build 26): blocks loud ≥25% of the time while she thinks (≥20 blocks), or a pause that ended on
+  sound without words, put the reply in words-only cut-in like a speaker. The level trigger is off, two foreign
+  words pause and two confirm, and no quiet-voice turns are taken. It is re-measured every reply.
 - Speaker mode (build 21): voice processing puts the session in voice-chat mode, which only allows call routes,
   so a music-only speaker (the JBL Tuner, A2DP) was dropped for the iPhone speaker. `start()` notes the
   Bluetooth/AirPlay output before voice processing. If the route lands on the iPhone speaker 0.7 s later, it

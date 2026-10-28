@@ -222,6 +222,16 @@ final class EndpointerTests: XCTestCase {
         XCTAssertEqual(e.take(at: 6.7), "Okay so,")
     }
 
+    func testAnUnfinishedGuessWaitsLonger() {
+        var e = Endpointer(finalGap: 1.6, volatileGap: 2.5, sentenceGap: 0.8, guessSentenceGap: 1.8)
+        e.add("Show me a YouTube video, anything, but be", isFinal: false, at: 1)
+        XCTAssertNil(e.take(at: 3))
+        XCTAssertEqual(e.take(at: 3.6), "Show me a YouTube video, anything, but be")
+        e.add("That's great.", isFinal: false, at: 5)
+        XCTAssertNil(e.take(at: 6.5))
+        XCTAssertEqual(e.take(at: 6.9), "That's great.")
+    }
+
     func testTalkingAgainCancelsTheSpeechEnd() {
         var e = Endpointer(finalGap: 1.6, volatileGap: 2.5)
         e.add("Okay so,", isFinal: true, at: 1)

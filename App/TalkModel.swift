@@ -127,6 +127,12 @@ final class TalkModel: ObservableObject {
     /// to their call profile instead and keep it. The mic hears her here, so loudness can't cut her off: words that
     /// aren't in her reply do (build 22).
     private var speakerMode = false
+    /// Sound in the room without anyone talking (a radio, a TV): measured while she thinks, or a pause that ended
+    /// on sound without words. Then, like on a speaker, only words cut her off (two of them), and a quiet voice
+    /// doesn't start a turn: the radio cut her three times and could have taken turns (28 Oct).
+    private var noisyRoom = false
+    private var roomBlocks = 0
+    private var roomLoudBlocks = 0
     private var windowUntil = 0.0
     private var resumeVoiceAfterMusic = false
 
@@ -494,6 +500,7 @@ final class TalkModel: ObservableObject {
             let speaker = Self.musicOutput
             speakerMode = false
             gate = CutInGate()
+            noisyRoom = false
             try engine.start(voiceProcessing: true)
             if let speaker {
                 // Voice processing moves the route; give it a moment, then see where she ended up.
@@ -555,8 +562,9 @@ final class TalkModel: ObservableObject {
         if choice == .deepgram {
             do {
                 // Deepgram says when speech ended; these gaps are only the backstop.
-                // Without a speech end or a final (often on a speaker), an unchanged guess ends the turn after 1.8 s.
-                endpointer = Endpointer(finalGap: 1.6, volatileGap: 1.8, sentenceGap: 0.8)
+                // Without a speech end or a final (often on a speaker), an unchanged guess that ends a sentence ends
+                // the turn after 1.8 s; one that doesn't waits 2.5 s ("…anything, but be" was cut at 1.8 s).
+                endpointer = Endpointer(finalGap: 1.6, volatileGap: 2.5, sentenceGap: 0.8, guessSentenceGap: 1.8)
                 let stream = self.deepgram
                 mic.target = { buffer in stream.feed(buffer) }
                 try deepgram.start(
@@ -608,13 +616,17 @@ final class TalkModel: ObservableObject {
         levels.micDB = muted ? Level.silenceDB : block.levelDB
         if !shielded && block.levelDB > detector.threshold(playing: false) { lastLoudAt = now }
         if !shielded && block.levelDB > max(-55, detector.noiseFloorDB + 8) { lastHeardAt = now }
+        if phase == .thinking && !playing {
+            roomBlocks += 1
+            if block.levelDB > detector.threshold(playing: false) { roomLoudBlocks += 1 }
+        }
         let speech = detector.process(levelDB: block.levelDB, durationMs: block.durationMs, playing: shielded,
                                       strict: strict)
         if paused {
             act(gate.level(loud: !muted && block.levelDB > detector.threshold(playing: false), at: now), at: now)
             return
         }
-        if speech && phase == .speaking && bargeInOn && !speakerMode && !muted {
+        if speech && phase == .speaking && bargeInOn && !speakerMode && !noisyRoom && !muted {
             let into = settlingUntil.map { now - ($0 - Self.settleSeconds) } ?? 0
             note(String(format: "sound over her: mic %.0f dB over the %.0f dB line (floor %.0f), %@, %.1f s into her voice%@",
                         block.levelDB, meter.threshold, detector.noiseFloorDB,
@@ -631,14 +643,21 @@ final class TalkModel: ObservableObject {
         }
     }
 
+    private func setNoisyRoom(_ noisy: Bool) {
+        noisyRoom = noisy
+        if !speakerMode { gate.minWords = noisy ? 2 : 1 }
+    }
+
     /// What the gate decided about a sound over her voice.
     private func act(_ action: CutInGate.Action, at now: Double) {
         switch action {
         case .wait:
             break
-        case .resume(let pausedAt):
+        case .resume(let pausedAt, let background):
             let held = now - pausedAt
-            note(String(format: "carried on after %.1f s, no words from you", held))
+            note(String(format: "carried on after %.1f s, no words from you%@", held,
+                        background ? " (sound kept going: only words stop her now)" : ""))
+            if background { setNoisyRoom(true) }
             if playbackEnd > pausedAt { playbackEnd += held }
             if let settling = settlingUntil, settling > pausedAt { settlingUntil = settling + held }
             timeline.shift(after: pausedAt, by: held)
@@ -647,7 +666,7 @@ final class TalkModel: ObservableObject {
             strictUntil = now + 1
             engine.resumePlayback()
         case .cut(let pausedAt, let words):
-            note(words.map { "cut off by your words: \"\($0)\"" } ?? "cut off: you kept talking for 1 s")
+            note("cut off by your words: \"\(words ?? "")\"")
             cutIn(at: pausedAt)
         }
     }
@@ -656,9 +675,9 @@ final class TalkModel: ObservableObject {
         if gate.isPaused && !muted {
             // While she is paused for a sound, words decide it; if they cut her off, this result starts the turn.
             act(gate.heard(words), at: Self.now)
-        } else if speakerMode && phase == .speaking && bargeInOn && !muted {
-            // No echo cancellation on a speaker: the mic hears her too, so words that aren't in her reply are the
-            // user. They pause her, and words that follow confirm it as on the phone.
+        } else if (speakerMode || noisyRoom) && phase == .speaking && bargeInOn && !muted {
+            // No echo cancellation on a speaker (the mic hears her too), or a noisy room: words that aren't in her
+            // reply are the user. They pause her, and words that follow confirm it as on the phone.
             let script = lines.last(where: { !$0.fromUser }).map { SpeechText.clean($0.text) } ?? ""
             let herWords = CutInGate.vocabulary(script)
             let yours = words.filter { $0.end > turnEndedAt && CutInGate.isForeign($0.text, to: herWords) }
@@ -715,7 +734,7 @@ final class TalkModel: ObservableObject {
             // On a speaker the mic level says little (it hears her at full volume); her words are filtered by what
             // she said instead. On the phone a quiet voice must still rise above the lower line.
             let afterHer = turnWordsFrom.map { $0 >= listeningSince + 0.3 } ?? false
-            let quietVoice = afterHer && (speakerMode || lastHeardAt >= listeningSince)
+            let quietVoice = afterHer && !noisyRoom && (speakerMode || lastHeardAt >= listeningSince)
             turnWordsFrom = nil
             guard lastLoudAt >= listeningSince || quietVoice else {
                 note("ignored, the mic never heard you loud enough (echo?): \"\(text)\"")
@@ -769,6 +788,8 @@ final class TalkModel: ObservableObject {
         turnEndedAt = Self.now
         firstTextAt = nil
         firstAudioAt = nil
+        roomBlocks = 0
+        roomLoudBlocks = 0
         timeline = HeardTimeline()
         pending = []
         replyOpen = true
@@ -891,6 +912,15 @@ final class TalkModel: ObservableObject {
         levels.addSpeech(samples, start: startAt, seconds: seconds)
         if firstAudioAt == nil {
             firstAudioAt = now
+            // The room while she thought: loud a quarter of the time with nobody meant to talk is a radio or a TV.
+            if roomBlocks >= 20 {
+                let share = Double(roomLoudBlocks) / Double(roomBlocks)
+                if (share >= 0.25) != noisyRoom {
+                    note(String(format: "room %@ (%.0f%% loud while she thought)",
+                                share >= 0.25 ? "noisy: only your words stop her" : "quiet again", share * 100))
+                }
+                setNoisyRoom(share >= 0.25)
+            }
             phase = .speaking
             let text = firstTextAt.map { String(format: "first text %.1f s, ", $0 - turnEndedAt) } ?? ""
             note(String(format: "%@first audio %.1f s after your turn ended", text, now - turnEndedAt))

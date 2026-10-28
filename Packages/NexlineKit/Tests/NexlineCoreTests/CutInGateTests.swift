@@ -18,7 +18,7 @@ final class CutInGateTests: XCTestCase {
         gate.pause(at: 10, herText: "There was a lighthouse keeper")
         XCTAssertEqual(blocks(&gate, loud: true, from: 10, to: 10.3), .wait)
         XCTAssertEqual(blocks(&gate, loud: false, from: 10.3, to: 11.2), .wait)
-        XCTAssertEqual(blocks(&gate, loud: false, from: 11.2, to: 11.4), .resume(pausedAt: 10))
+        XCTAssertEqual(blocks(&gate, loud: false, from: 11.2, to: 11.4), .resume(pausedAt: 10, background: false))
         XCTAssertFalse(gate.isPaused)
     }
 
@@ -41,13 +41,20 @@ final class CutInGateTests: XCTestCase {
         XCTAssertEqual(gate.heard([HeardWord("good", start: 10.4, end: 10.7)]), .cut(pausedAt: 10, words: "good"))
     }
 
-    func testSpeechWithoutWordsCutsAfterASecond() {
+    func testMusicWithoutWordsLetsHerCarryOn() {
         var gate = CutInGate()
         gate.pause(at: 10, herText: "Hello")
-        // Syllables with short dips: still one stretch of sound.
-        XCTAssertEqual(blocks(&gate, loud: true, from: 10, to: 10.4), .wait)
-        XCTAssertEqual(blocks(&gate, loud: false, from: 10.4, to: 10.6), .wait)
-        XCTAssertEqual(blocks(&gate, loud: true, from: 10.6, to: 11.1), .cut(pausedAt: 10, words: nil))
+        XCTAssertEqual(blocks(&gate, loud: true, from: 10, to: 11.4), .wait)
+        XCTAssertEqual(blocks(&gate, loud: true, from: 11.4, to: 11.6), .resume(pausedAt: 10, background: true))
+    }
+
+    func testANoisyRoomNeedsTwoWords() {
+        var gate = CutInGate()
+        gate.minWords = 2
+        gate.pause(at: 10, herText: "Loud and clear")
+        XCTAssertEqual(gate.heard([HeardWord("think", start: 9.9, end: 10.2)]), .wait)
+        XCTAssertEqual(gate.heard([HeardWord("wait", start: 10.5, end: 10.7), HeardWord("stop", start: 10.8, end: 11.0)]),
+                       .cut(pausedAt: 10, words: "wait stop"))
     }
 
     func testHerWordsAsTheRecognizerWritesThem() {
