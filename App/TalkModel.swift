@@ -75,6 +75,11 @@ final class TalkModel: ObservableObject {
     @Published private(set) var awake = true
     /// Voice is off because a mix is playing; it comes back when the mix stops.
     @Published private(set) var pausedForMusic = false
+    /// Music is playing and she listens only for her name, with echo cancellation off (it squashes music).
+    /// "Nexa, …" holds the music, she answers as usual, and it comes back a few seconds after her reply.
+    @Published private(set) var musicListening = false
+    private var resumeMusicAfterReply = false
+    private var musicResumeAt = 0.0
     /// "first audio 1.2 s" for the voice screen's debug line.
     @Published private(set) var lastTiming: String?
     /// Her voice and the mic level, read by the voice screen every frame (not published).
@@ -285,6 +290,8 @@ final class TalkModel: ObservableObject {
     func endVoice() async {
         resumeVoiceAfterMusic = false
         pausedForMusic = false
+        resumeMusicAfterReply = false
+        musicResumeAt = 0
         await stop()
     }
 
@@ -299,32 +306,50 @@ final class TalkModel: ObservableObject {
         if phase == .thinking || phase == .speaking { cutIn() }
     }
 
-    /// A mix needs the audio session without voice processing (it gates music to near silence), so voice stops
-    /// while it plays and starts again after.
     /// A line in the log from the music player.
     func musicNote(_ text: String) {
         note(text)
     }
 
+    /// A mix needs the audio session without voice processing (it gates music to near silence), so while it plays
+    /// voice only listens for her name, without echo cancellation, and starts again fully after.
     func pauseForMusic() async {
         guard phase != .off else { return }
         resumeVoiceAfterMusic = true
         pausedForMusic = true
         await stop()
+        await start(musicEars: true)
     }
 
     func musicStopped() async {
         guard resumeVoiceAfterMusic else { return }
         resumeVoiceAfterMusic = false
         pausedForMusic = false
+        await stop()
         await start()
+    }
+
+    /// Her name over the music: hold the music and start voice as usual for this turn.
+    private func wakeFromMusic(_ text: String) {
+        note("music: heard you, holding it")
+        InlineAudio.shared.pauseForVoice()
+        resumeVoiceAfterMusic = false
+        pausedForMusic = false
+        resumeMusicAfterReply = true
+        Task {
+            await self.stop()
+            await self.start()
+            guard self.phase == .listening else { return }
+            self.send(text)
+        }
     }
 
     /// Standby lets a sentence through when it starts with her name ("Hey Nexa, …"), or while the conversation
     /// window from the last one is still open.
     private func admits(_ text: String) -> Bool {
-        guard standby else { return true }
-        if Self.now < windowUntil {
+        // Over music only her name counts (lyrics, the room), with no conversation window.
+        guard standby || musicListening else { return true }
+        if !musicListening && Self.now < windowUntil {
             openWindow()
             return true
         }
@@ -488,7 +513,8 @@ final class TalkModel: ObservableObject {
         if phase == .off { await start() } else { await stop() }
     }
 
-    func start() async {
+    /// `musicEars`: music is playing, so listen for her name only, without voice processing.
+    func start(musicEars: Bool = false) async {
         guard phase == .off else { return }
         guard canChat else {
             note("add Nexa's token first (Settings)")
@@ -506,8 +532,11 @@ final class TalkModel: ObservableObject {
             speakerMode = false
             gate = CutInGate()
             noisyRoom = false
-            try engine.start(voiceProcessing: true)
-            if let speaker {
+            try engine.start(voiceProcessing: !musicEars)
+            musicListening = musicEars
+            if musicEars {
+                note("music: listening for \"\(bot.name)\"")
+            } else if let speaker {
                 // Voice processing moves the route; give it a moment, then see where she ended up.
                 try? await Task.sleep(for: .milliseconds(700))
                 guard phase == .starting else { return }
@@ -548,6 +577,7 @@ final class TalkModel: ObservableObject {
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         hearing = ""
         speakerMode = false
+        musicListening = false
         phase = .off
     }
 
@@ -727,6 +757,14 @@ final class TalkModel: ObservableObject {
         if awake != isAwake { awake = isAwake }
         switch phase {
         case .listening:
+            // Nothing more said a few seconds after her answer over the music: the music comes back.
+            if resumeMusicAfterReply && musicResumeAt > 0 && now >= musicResumeAt && endpointer.text.isEmpty {
+                resumeMusicAfterReply = false
+                musicResumeAt = 0
+                note("music: back on")
+                InlineAudio.shared.resume()
+                return
+            }
             guard let text = endpointer.take(at: now) else { return }
             hearing = ""
             if ears == .deepgram, let lastWordAt {
@@ -746,7 +784,11 @@ final class TalkModel: ObservableObject {
                 return
             }
             guard admits(text) else {
-                note("standby, not for \(bot.name): \"\(text)\"")
+                note("\(musicListening ? "music" : "standby"), not for \(bot.name): \"\(text)\"")
+                return
+            }
+            if musicListening {
+                wakeFromMusic(text)
                 return
             }
             send(text)
@@ -939,6 +981,7 @@ final class TalkModel: ObservableObject {
         speakTask = nil
         lastTurnAt = Self.now
         tools = []
+        if resumeMusicAfterReply { musicResumeAt = Self.now + 6 }
         if standby { openWindow() }
         launchOpenLine()
         beginListening()

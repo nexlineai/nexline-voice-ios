@@ -131,6 +131,16 @@ final class InlineAudio: ObservableObject {
         }
     }
 
+    /// She heard her name over the music: hold it while she answers. Voice owns the session now, and `resume()`
+    /// brings the music back (voice goes back to listening for her name).
+    func pauseForVoice() {
+        guard state == .playing, let player else { return }
+        if kind == .radio { teardown() } else { player.pause() }
+        state = .paused
+        holdsVoice = false
+        updateNowPlaying()
+    }
+
     /// Stops and forgets the mix, and gives voice back.
     func stop() {
         session += 1
@@ -304,6 +314,11 @@ final class InlineAudio: ObservableObject {
 
     private func activateSession() {
         let audio = AVAudioSession.sharedInstance()
+        // Voice listens for her name during the music and set the session up for both (play and record).
+        if talk?.musicListening == true {
+            try? audio.setActive(true)
+            return
+        }
         try? audio.setCategory(.playback, mode: .default)
         try? audio.setActive(true)
     }

@@ -87,7 +87,9 @@ struct VoiceModeView: View {
     }
 
     private var stateLabel: String {
-        if talk.pausedForMusic { return "MUSIC · VOICE IS PAUSED" }
+        if talk.pausedForMusic {
+            return talk.musicListening ? "MUSIC · SAY \(bot.name.uppercased())" : "MUSIC · VOICE IS PAUSED"
+        }
         if talk.muted { return "MUTED" }
         switch talk.phase {
         case .off: return "CONNECTING…"
