@@ -59,7 +59,11 @@ Plan, decisions and the feature cut-list are in the vault:
   Nexa"), `Router` (navigation, voice cover, `nexlinevoice://voice|chat|home/<bot>`).
 - One `TalkModel` for the whole app (created in `NexlineVoiceApp`): two voice-processing engines would fight. Agents
   are a seam on it (`select(bot)`, `replies()` → `NexaClient.chat` or `AgentClient`, OpenAI SSE with Bearer key +
-  `X-Hermes-Session-Id`); `ChatStore` keeps Carapava/Mamadona chats (and a Nexa cache) on the phone. Standby
+  `X-Hermes-Session-Id`); `ChatStore` keeps Carapava/Mamadona chats (and a Nexa cache) on the phone. With the
+  session header, Hermes reads history from its own state.db and ignores the body's, so a cut-off agent reply is
+  marked on the phone and the next turn starts with "[I cut your last reply off; I heard …]". Only Nexa gets
+  `/chat/interrupt` (until build 19 every bot's cut-in rewrote Nexa's history). In voice mode the agents get
+  `AgentClient.voiceHint` as the system message: the reply is spoken, and `[pause]` is silence. Standby
   (name gate + conversation window), mute and the music hand-off sit around the tested listen/send/speak path,
   which must stay as it is. Standby defaults off.
 - Listening: `MicRouter` hands mic buffers to `DeepgramListener` (Nova-3 streaming, keyterms, `speech_final` /
@@ -75,6 +79,14 @@ Plan, decisions and the feature cut-list are in the vault:
   heard the user above the line, which stops a self-talk loop.
 - Cut-in (build 16): the whole reply uses the playback line, including the silent gaps between pieces, and the
   first 3.5 s of her voice after a start or route change are strict (+8 dB, 400 ms) while echo cancellation
-  settles. The first spoken piece is at least 10 characters. Every cut-in logs level, line, floor and gap/settling.
+  settles. The first spoken piece is at least 10 characters.
+- Cut-in (build 19, `CutInGate`): with Deepgram, a sound over her voice only pauses playback (`pausePlayback`
+  keeps the queue). Words with Deepgram word times that end after the pause, or near it and not hers, cut her
+  off as of the pause. So does 1 s of sound without words. 1 s of quiet with no words and she carries on: the
+  timeline, levels, `playbackEnd` and settling all move by the pause, with 1 s strict after. The iPhone
+  recognizer has no word times, so it still cuts at once. The log says "sound over her", then "carried on" or
+  "cut off by your words".
 - Playback format is 24 kHz mono float; xAI streams 24 kHz 16-bit PCM, decoded to float.
-- Logs use subsystem `com.nexlineai.voice`; read them on Omarchy with `idevicesyslog` over USB.
+- Logs use subsystem `com.nexlineai.voice`; read them on Omarchy with `idevicesyslog` over USB. The app keeps the
+  last 500 lines: Settings → Diagnostics → Copy log. A Deepgram turn logs how long after the last word it ended
+  and why (`speech_final`, `UtteranceEnd` or the silence backstop).

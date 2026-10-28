@@ -19,11 +19,20 @@ enum AgentClient {
         }
     }
 
+    /// What the app can do with a reply that's spoken, sent as the system message in voice mode. Without it
+    /// Mamadona ran a shell countdown with sleeps for "count with pauses" (45 s) and Carapava made an MP3.
+    static let voiceHint = "You're talking through the Nexline Voice app: your reply is spoken aloud as it "
+        + "streams in. Write [pause] for a short silence or [long pause] for a longer one."
+
     /// `history` is the conversation before this turn; only the last 20 messages are sent. Past photos are not
     /// re-sent (thousands of tokens each); a note keeps the conversation coherent.
+    ///
+    /// The gateway keeps its own history for the session, so a reply the user cut off stays whole there:
+    /// `cutOffAfter` (what they heard of it) goes in front of this turn instead.
     @MainActor
-    static func chat(_ bot: Bot, text: String, history: [TalkModel.Line],
-                     image: String?) -> AsyncThrowingStream<ChatStreamParser.Event, Error> {
+    static func chat(_ bot: Bot, text: String, history: [TalkModel.Line], image: String?,
+                     cutOffAfter: String? = nil,
+                     voice: Bool = false) -> AsyncThrowingStream<ChatStreamParser.Event, Error> {
         let session = ChatStore.shared.sessionID(bot)
         let model = Prefs.model(bot)
         let past: [[String: Any]] = history
@@ -33,18 +42,24 @@ enum AgentClient {
                 let content = line.imageFile == nil ? line.text : "\(line.text) [the user attached an image here]"
                 return ["role": line.fromUser ? "user" : "assistant", "content": content]
             }
+        var said = text.isEmpty && image != nil ? "What do you see in this image?" : text
+        if let cutOffAfter {
+            let heard = cutOffAfter.isEmpty ? "none of it" : "only \"\(cutOffAfter)\""
+            said = "[I cut your last reply off; I heard \(heard).] " + text
+        }
         let current: Any
         if let image {
             current = [
-                ["type": "text", "text": text.isEmpty ? "What do you see in this image?" : text],
+                ["type": "text", "text": said],
                 ["type": "image_url", "image_url": ["url": image]],
             ]
         } else {
-            current = text
+            current = said
         }
+        let system: [[String: Any]] = voice ? [["role": "system", "content": voiceHint]] : []
         let body: [String: Any] = [
             "model": model,
-            "messages": past + [["role": "user", "content": current]],
+            "messages": system + past + [["role": "user", "content": current]],
             "stream": true,
         ]
 

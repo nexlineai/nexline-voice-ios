@@ -43,6 +43,14 @@ final class VoiceLevels {
         windows.removeAll()
     }
 
+    /// Her playback was held at `time` for `seconds`: what was still to play moves later.
+    func shift(after time: Double, by seconds: Double) {
+        windows = windows.map { window in
+            guard window.end > time else { return window }
+            return Window(start: window.start + seconds, end: window.end + seconds, level: window.level)
+        }
+    }
+
     /// 0…1, her voice at uptime `t` (0 when she is silent).
     func speech(at t: Double) -> Float {
         for window in windows where window.start <= t && t < window.end {

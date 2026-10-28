@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import NexlineCore
 
 /// Deepgram streaming speech-to-text (Nova-3, English), fed with the voice engine's echo-cancelled mic
 /// buffers. Same settings as the RN app: 500 ms endpointing, UtteranceEnd after 1.4 s as a backstop, and the
@@ -34,11 +35,12 @@ final class DeepgramListener: @unchecked Sendable {
     private var socket: URLSessionWebSocketTask?
     private var tasks: [Task<Void, Never>] = []
 
-    /// Opens the stream. `onResult(text, isFinal, endsAt)` gets each result with the uptime its audio ends at.
+    /// Opens the stream. `onResult(text, isFinal, endsAt, words)` gets each result with the uptime its audio ends
+    /// at and its words with their uptimes. `onSpeechEnd` says which Deepgram event ended the speech.
     /// `onFail` is called once if the connection breaks (not after `stop()`).
     @MainActor
-    func start(onResult: @escaping @MainActor (String, Bool, Double?) -> Void,
-               onSpeechEnd: @escaping @MainActor () -> Void,
+    func start(onResult: @escaping @MainActor (String, Bool, Double?, [HeardWord]) -> Void,
+               onSpeechEnd: @escaping @MainActor (String) -> Void,
                onFail: @escaping @MainActor (String) -> Void) throws {
         stop()
         guard let key = Keychain.get(.deepgramKey) else { throw DeepgramError.noKey }
@@ -80,10 +82,16 @@ final class DeepgramListener: @unchecked Sendable {
                         let start = (object["start"] as? Double) ?? 0
                         let duration = (object["duration"] as? Double) ?? 0
                         let endsAt = self.recordedAt(start + duration)
-                        onResult(text, (object["is_final"] as? Bool) ?? false, endsAt)
-                        if (object["speech_final"] as? Bool) == true { onSpeechEnd() }
+                        let words = (best?["words"] as? [[String: Any]] ?? []).compactMap { word -> HeardWord? in
+                            guard let text = (word["punctuated_word"] ?? word["word"]) as? String,
+                                  let from = (word["start"] as? Double).flatMap(self.recordedAt),
+                                  let to = (word["end"] as? Double).flatMap(self.recordedAt) else { return nil }
+                            return HeardWord(text, start: from, end: to)
+                        }
+                        onResult(text, (object["is_final"] as? Bool) ?? false, endsAt, words)
+                        if (object["speech_final"] as? Bool) == true { onSpeechEnd("speech_final") }
                     case "UtteranceEnd":
-                        onSpeechEnd()
+                        onSpeechEnd("UtteranceEnd")
                     default:
                         continue
                     }

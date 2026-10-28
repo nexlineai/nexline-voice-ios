@@ -9,6 +9,8 @@ final class SpeechTextTests: XCTestCase {
         XCTAssertEqual(SpeechText.clean("See [the docs](https://x.ai) now"), "See the docs now")
         XCTAssertEqual(SpeechText.clean("Turned on [ha:device:switch.airco_plug]."), "Turned on .")
         XCTAssertEqual(SpeechText.clean("Opening maps\nOPEN:maps:lisbon"), "Opening maps")
+        XCTAssertEqual(SpeechText.clean("Let me make it. MEDIA:/root/.hermes/cache/audio/tts_065802.mp3"),
+                       "Let me make it.")
         XCTAssertEqual(SpeechText.clean("<think>plan</think>Hi"), "Hi")
     }
 
@@ -87,6 +89,21 @@ final class HeardTimelineTests: XCTestCase {
         XCTAssertFalse(t.fullyPlayed(at: 1.5))
         XCTAssertTrue(t.fullyPlayed(at: 2))
         XCTAssertTrue(HeardTimeline().fullyPlayed(at: 0))
+    }
+
+    func testAPauseMovesWhatWasStillToPlay() {
+        var t = HeardTimeline()
+        t.add("one two", start: 0, end: 1)
+        t.add("three four", start: 1, end: 2)
+        t.add("five six", start: 2, end: 3)
+        XCTAssertEqual(t.text(around: 1.5), "one two three four")
+        // Held at 1.5 for 2 s: "three four" was half played, the rest waits.
+        t.shift(after: 1.5, by: 2)
+        XCTAssertEqual(t.heard(at: 1.5), "one two")
+        XCTAssertEqual(t.heard(at: 3.5), "one two three")
+        XCTAssertEqual(t.heard(at: 4.0), "one two three four")
+        XCTAssertFalse(t.fullyPlayed(at: 4.5))
+        XCTAssertTrue(t.fullyPlayed(at: 5))
     }
 }
 

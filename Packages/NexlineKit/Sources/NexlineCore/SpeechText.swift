@@ -28,6 +28,8 @@ public enum SpeechText {
         (re("^\\s*CAMERA:camera\\.[a-z0-9_]+\\s*$", [.anchorsMatchLines, .caseInsensitive]), ""),
         (re("\\[ha:[a-z]+:[\\w.]+(?::\\d+)?\\]", .caseInsensitive), ""),
         (re("^\\s*OPEN:[a-z]+(?::.*)?$", [.anchorsMatchLines, .caseInsensitive]), ""),
+        // Hermes's MEDIA:<path> marks a file it made, not words (Carapava's was read out, build 18).
+        (re("\\bMEDIA:\\S+"), ""),
         // Status asides the model invents ("[Done]"): real expression tags are lowercase.
         (re("\\[[A-Z][^\\]\\n]{0,60}\\]"), ""),
         (re("https?://\\S+"), ""),
@@ -183,5 +185,20 @@ public struct HeardTimeline: Sendable {
     /// True when everything queued has played, so a cut-in there isn't one.
     public func fullyPlayed(at now: Double) -> Bool {
         pieces.allSatisfy { $0.end <= now }
+    }
+
+    /// What she was saying at `time`: the piece playing then and the one before it (her echo can lag).
+    public func text(around time: Double) -> String {
+        guard let index = pieces.lastIndex(where: { $0.start <= time }) else { return "" }
+        return pieces[max(0, index - 1)...index].map(\.text).joined(separator: " ")
+    }
+
+    /// Playback was held at `time` for `seconds`: everything still to play then moves later. A piece cut in
+    /// half moves whole, so the share of it heard by any later time stays right.
+    public mutating func shift(after time: Double, by seconds: Double) {
+        pieces = pieces.map { piece in
+            guard piece.end > time else { return piece }
+            return Piece(text: piece.text, start: piece.start + seconds, end: piece.end + seconds)
+        }
     }
 }

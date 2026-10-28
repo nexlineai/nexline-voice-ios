@@ -106,6 +106,15 @@ final class TalkModel: ObservableObject {
     /// Who is listening right now (Deepgram falls back to the iPhone mid-session).
     private var ears = EarsChoice.iphone
     private var detector = BargeInDetector()
+    /// A sound over her voice pauses her; the user's words cut her off, anything else lets her carry on.
+    private var gate = CutInGate()
+    /// Everything paused so far: a piece still streaming in when she carries on lands this much later.
+    private var pausedTotal = 0.0
+    /// The piece being synthesized now: it joins the timeline only once it has streamed in, but its echo
+    /// must already be told from the user's words.
+    private var speakingText = ""
+    /// After she carries on, echo cancellation settles again on her voice: cut-ins are strict until then.
+    private var strictUntil = 0.0
     private var endpointer = Endpointer()
     private var observers: [NSObjectProtocol] = []
     private var logCount = 0
@@ -138,9 +147,15 @@ final class TalkModel: ObservableObject {
     /// a few echo words recognized after Nexa stops could start a turn by themselves (a self-talk loop).
     private var listeningSince = 0.0
     private var lastLoudAt = -1.0
+    /// When the user's last recognized word ended, and what ended their speech, for the turn-end log line.
+    private var lastWordAt: Double?
+    private var speechEndedBy: String?
+    /// Carapava and Mamadona keep their history on their own server, so a cut-off reply is only fixed there
+    /// by telling them on the next turn what the user heard.
+    private var agentCutNote: String?
 
     private static var now: Double { ProcessInfo.processInfo.systemUptime }
-    private var playing: Bool { Self.now < playbackEnd }
+    private var playing: Bool { Self.now < playbackEnd && !gate.isPaused }
 
     init() {
         let router = self.mic
@@ -166,6 +181,7 @@ final class TalkModel: ObservableObject {
         typedTask = nil
         typing = false
         bot = newBot
+        agentCutNote = nil
         lines = ChatStore.shared.lines(newBot)
         tools = []
         hearing = ""
@@ -177,9 +193,13 @@ final class TalkModel: ObservableObject {
     var canChat: Bool { bot != .nexa || keysSet }
 
     /// The reply stream for this turn: serve.py for Nexa, the gateway for the others.
-    private func replies(_ text: String, image: String?) -> AsyncThrowingStream<ChatStreamParser.Event, Error> {
+    private func replies(_ text: String, image: String?,
+                         voice: Bool = false) -> AsyncThrowingStream<ChatStreamParser.Event, Error> {
         if bot == .nexa { return nexa.chat(text, image: image) }
-        return AgentClient.chat(bot, text: text, history: Array(lines.dropLast(2)), image: image)
+        let cut = agentCutNote
+        agentCutNote = nil
+        return AgentClient.chat(bot, text: text, history: Array(lines.dropLast(2)), image: image,
+                                cutOffAfter: cut, voice: voice)
     }
 
     private func trace(_ label: String, _ status: String) {
@@ -492,8 +512,10 @@ final class TalkModel: ObservableObject {
                 let stream = self.deepgram
                 mic.target = { buffer in stream.feed(buffer) }
                 try deepgram.start(
-                    onResult: { [weak self] text, isFinal, endsAt in self?.recognized(text, isFinal: isFinal, endsAt: endsAt) },
-                    onSpeechEnd: { [weak self] in self?.speechEnded() },
+                    onResult: { [weak self] text, isFinal, endsAt, words in
+                        self?.recognized(text, isFinal: isFinal, endsAt: endsAt, words: words)
+                    },
+                    onSpeechEnd: { [weak self] event in self?.speechEnded(by: event) },
                     onFail: { [weak self] reason in Task { await self?.earsFailed(reason) } })
                 ears = .deepgram
                 note("listening with Deepgram")
@@ -529,35 +551,76 @@ final class TalkModel: ObservableObject {
     private func micBlock(_ block: VoiceEngine.MicBlock) {
         let now = Self.now
         let playing = self.playing
+        let paused = gate.isPaused
         // The gaps between her pieces count as playing: the echo tail of a short first piece cut her off there.
-        let shielded = playing || phase == .speaking
-        let strict = settlingUntil.map { now < $0 } ?? false
+        let shielded = !paused && (playing || phase == .speaking)
+        let strict = !paused && ((settlingUntil.map { now < $0 } ?? false) || now < strictUntil)
         meter.db = block.levelDB
         meter.threshold = detector.threshold(playing: shielded, strict: strict)
         levels.micDB = muted ? Level.silenceDB : block.levelDB
         if !shielded && block.levelDB > detector.threshold(playing: false) { lastLoudAt = now }
         let speech = detector.process(levelDB: block.levelDB, durationMs: block.durationMs, playing: shielded,
                                       strict: strict)
+        if paused {
+            act(gate.level(loud: block.levelDB > detector.threshold(playing: false), at: now), at: now)
+            return
+        }
         if speech && phase == .speaking && bargeInOn && !muted {
             let into = settlingUntil.map { now - ($0 - Self.settleSeconds) } ?? 0
-            note(String(format: "cut-in: mic %.0f dB over the %.0f dB line (floor %.0f), %@, %.1f s into her voice%@",
+            note(String(format: "sound over her: mic %.0f dB over the %.0f dB line (floor %.0f), %@, %.1f s into her voice%@",
                         block.levelDB, meter.threshold, detector.noiseFloorDB,
                         playing ? "while she played" : "in a gap between pieces", into,
                         strict ? ", echo cancellation settling" : ""))
-            cutIn()
+            // Only Deepgram gives word times to tell the user from her echo; the iPhone's recognizer cuts at once.
+            if ears == .deepgram {
+                gate.pause(at: now, herText: timeline.text(around: now) + " " + speakingText)
+                engine.pausePlayback()
+            } else {
+                cutIn()
+            }
         }
     }
 
-    private func recognized(_ text: String, isFinal: Bool, endsAt: Double?) {
+    /// What the gate decided about a sound over her voice.
+    private func act(_ action: CutInGate.Action, at now: Double) {
+        switch action {
+        case .wait:
+            break
+        case .resume(let pausedAt):
+            let held = now - pausedAt
+            note(String(format: "carried on after %.1f s, no words from you", held))
+            if playbackEnd > pausedAt { playbackEnd += held }
+            if let settling = settlingUntil, settling > pausedAt { settlingUntil = settling + held }
+            timeline.shift(after: pausedAt, by: held)
+            levels.shift(after: pausedAt, by: held)
+            pausedTotal += held
+            strictUntil = now + 1
+            engine.resumePlayback()
+        case .cut(let pausedAt, let words):
+            note(words.map { "cut off by your words: \"\($0)\"" } ?? "cut off: you kept talking for 1 s")
+            cutIn(at: pausedAt)
+        }
+    }
+
+    private func recognized(_ text: String, isFinal: Bool, endsAt: Double?, words: [HeardWord] = []) {
+        // While she is paused for a sound, words decide it; if they cut her off, this result starts the turn.
+        if gate.isPaused { act(gate.heard(words), at: Self.now) }
         guard phase == .listening, !muted else { return }
         // Deepgram's results arrive late: one whose audio ended before listening began is Nexa's echo.
         if let endsAt, endsAt < listeningSince { return }
+        // So are its words that ended before then (a result that confirmed a cut-in can start with her echo).
+        var text = text
+        if let first = words.first, first.end < listeningSince {
+            text = words.filter { $0.end >= listeningSince }.map(\.text).joined(separator: " ")
+        }
+        if let last = words.last { lastWordAt = last.end }
         endpointer.add(text, isFinal: isFinal, at: Self.now)
         hearing = endpointer.text
     }
 
-    private func speechEnded() {
+    private func speechEnded(by event: String) {
         guard phase == .listening else { return }
+        speechEndedBy = event
         endpointer.speechEnded(at: Self.now)
     }
 
@@ -569,6 +632,13 @@ final class TalkModel: ObservableObject {
         case .listening:
             guard let text = endpointer.take(at: now) else { return }
             hearing = ""
+            if ears == .deepgram, let lastWordAt {
+                note(String(format: "turn ended %.1f s after your last word (%@%@)", now - lastWordAt,
+                            speechEndedBy ?? "no end event, silence backstop",
+                            Endpointer.looksUnfinished(text) ? ", sounded unfinished" : ""))
+            }
+            lastWordAt = nil
+            speechEndedBy = nil
             guard lastLoudAt >= listeningSince else {
                 note("ignored, the mic never heard you loud enough (echo?): \"\(text)\"")
                 return
@@ -580,19 +650,25 @@ final class TalkModel: ObservableObject {
             send(text)
         case .thinking, .speaking:
             // Also ends a turn whose voice failed, which would otherwise stay "thinking".
-            if !replyOpen && pending.isEmpty && speakTask == nil && now >= playbackEnd { finishReply() }
+            if !gate.isPaused && !replyOpen && pending.isEmpty && speakTask == nil && now >= playbackEnd {
+                finishReply()
+            }
         default:
             break
         }
     }
 
-    private func cutIn() {
+    /// `pausedAt`: she was paused for the sound then, so that's where she stopped.
+    private func cutIn(at pausedAt: Double? = nil) {
         let now = Self.now
-        let heard = timeline.heard(at: now)
-        let complete = timeline.fullyPlayed(at: now) && !replyOpen && pending.isEmpty
+        let moment = pausedAt ?? now
+        let heard = timeline.heard(at: moment)
+        let complete = timeline.fullyPlayed(at: moment) && !replyOpen && pending.isEmpty
         cutReply(report: !complete, heard: heard)
         note(complete ? "you talked as she finished" : "you cut in after: \"\(heard)\"")
         beginListening()
+        // The words that confirmed the cut were said after the pause and are this turn's start.
+        if let pausedAt { listeningSince = pausedAt }
         lastLoudAt = now
     }
 
@@ -615,7 +691,7 @@ final class TalkModel: ObservableObject {
         playbackEnd = 0
         note("you: \(text)")
 
-        let stream = replies(text, image: photo.map(PhotoPrep.dataURI))
+        let stream = replies(text, image: photo.map(PhotoPrep.dataURI), voice: true)
         chatTask = Task { [weak self] in
             guard let self else { return }
             var flusher = SentenceFlusher()
@@ -692,20 +768,28 @@ final class TalkModel: ObservableObject {
             case .silence(let ms):
                 schedule([Float](repeating: 0, count: 24 * ms))
             case .voice(let text, let stream):
+                speakingText = text
                 var startAt: Double?
+                var pausedBefore = 0.0
                 var seconds = 0.0
                 do {
                     for try await chunk in stream {
                         guard gen == generation else { return }
                         let at = schedule(chunk)
-                        if startAt == nil { startAt = at }
+                        if startAt == nil {
+                            startAt = at
+                            pausedBefore = pausedTotal
+                        }
                         seconds += Double(chunk.count) / VoiceEngine.playbackFormat.sampleRate
                         if next == nil && !pending.isEmpty { next = open(pending.removeFirst()) }
                     }
                 } catch {
                     note("voice: \(error.localizedDescription)")
                 }
-                if let startAt { timeline.add(text, start: startAt, end: startAt + seconds) }
+                if let startAt {
+                    let moved = pausedTotal - pausedBefore
+                    timeline.add(text, start: startAt + moved, end: startAt + moved + seconds)
+                }
             }
         }
     }
@@ -714,7 +798,8 @@ final class TalkModel: ObservableObject {
     @discardableResult
     private func schedule(_ samples: [Float]) -> Double {
         let now = Self.now
-        let startAt = max(playbackEnd, now)
+        // While paused, new audio queues behind the pause and moves with everything else when she carries on.
+        let startAt = max(playbackEnd, gate.pausedAt ?? now)
         let seconds = engine.enqueue(samples)
         guard seconds > 0 else { return startAt }
         playbackEnd = startAt + seconds
@@ -761,12 +846,18 @@ final class TalkModel: ObservableObject {
         speakTask = nil
         pending = []
         replyOpen = false
+        gate.reset()
         engine.stopPlayback()
         playbackEnd = 0
         levels.clearSpeech()
-        if report {
+        guard report else { return }
+        // Only Nexa's server takes the report; it went to Nexa for every bot until build 19.
+        if bot == .nexa {
             let client = self.nexa
             Task { await client.reportInterrupt(heard: heard) }
+        } else if let index = lines.lastIndex(where: { !$0.fromUser }) {
+            lines[index].text = (heard.isEmpty ? "" : heard + " ") + ReplyBlocks.cutMarker
+            agentCutNote = heard
         }
     }
 
@@ -898,7 +989,7 @@ final class TalkModel: ObservableObject {
         logger.notice("\(text, privacy: .public)")
         logCount += 1
         log.append(LogLine(id: logCount, text: text))
-        if log.count > 80 { log.removeFirst(log.count - 80) }
+        if log.count > 500 { log.removeFirst(log.count - 500) }
     }
 }
 

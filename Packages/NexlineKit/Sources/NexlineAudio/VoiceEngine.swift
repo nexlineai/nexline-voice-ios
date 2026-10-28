@@ -65,6 +65,8 @@ public final class VoiceEngine {
     private var engine = AVAudioEngine()
     private var player = AVAudioPlayerNode()
     private var started = false
+    /// Playback held by `pausePlayback`: new audio queues behind it but doesn't start it.
+    private var paused = false
     private var configObserver: NSObjectProtocol?
     private var recentResumes: [Date] = []
     /// Bumped by every stop (and so every start), so a pending resume can tell it is stale.
@@ -97,6 +99,7 @@ public final class VoiceEngine {
 
         engine = AVAudioEngine()
         player = AVAudioPlayerNode()
+        paused = false
         let input = engine.inputNode
         try input.setVoiceProcessingEnabled(voiceProcessing)
         engine.attach(player)
@@ -137,7 +140,7 @@ public final class VoiceEngine {
         }
         for buffer in buffers.dropLast() { player.scheduleBuffer(buffer) }
         player.scheduleBuffer(last, completionCallbackType: .dataPlayedBack) { _ in completion() }
-        player.play()
+        if !paused { player.play() }
     }
 
     /// Queues mono samples in `playbackFormat` after whatever is already queued, for audio that streams
@@ -152,13 +155,27 @@ public final class VoiceEngine {
         buffer.frameLength = AVAudioFrameCount(samples.count)
         samples.withUnsafeBufferPointer { channel.update(from: $0.baseAddress!, count: samples.count) }
         player.scheduleBuffer(buffer)
-        if !player.isPlaying { player.play() }
+        if !paused && !player.isPlaying { player.play() }
         return Double(samples.count) / Self.playbackFormat.sampleRate
     }
 
     /// Stops playback and drops everything queued.
     public func stopPlayback() {
+        paused = false
         player.stop()
+    }
+
+    /// Holds playback where it is, keeping everything queued (a sound over her voice may not be the user).
+    public func pausePlayback() {
+        paused = true
+        player.pause()
+    }
+
+    /// Carries on from where `pausePlayback` held it.
+    public func resumePlayback() {
+        guard paused else { return }
+        paused = false
+        if isRunning { player.play() }
     }
 
     /// Input and output formats as the engine sees them now, for the log.
