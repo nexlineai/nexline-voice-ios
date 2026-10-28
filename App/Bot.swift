@@ -105,7 +105,9 @@ struct BotVoice: Equatable {
     static func current(_ bot: Bot) -> BotVoice {
         let defaults = UserDefaults.standard
         return BotVoice(
-            engine: defaults.string(forKey: engineKey(bot)).flatMap { VoiceChoice(rawValue: $0) } ?? .xai,
+            // Kokoro is Nexa's (her Jetson); the others never get it.
+            engine: defaults.string(forKey: engineKey(bot)).flatMap { VoiceChoice(rawValue: $0) }
+                .flatMap { $0 == .kokoro && bot != .nexa ? nil : $0 } ?? .xai,
             xai: defaults.string(forKey: xaiKey(bot)) ?? bot.defaultXAIVoice,
             deepgram: defaults.string(forKey: deepgramKey(bot)) ?? bot.defaultDeepgramVoice)
     }

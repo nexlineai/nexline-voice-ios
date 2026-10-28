@@ -41,6 +41,9 @@ Plan, decisions and the feature cut-list are in the vault:
   not replaced. `XAIVoice` (streaming, `ara`), `DeepgramVoice` (Aura-2 Thalia,
   Speak + Flush per piece), `DeviceVoice` (SpeechClip; build 8 showed `write()` is safe while the voice-processing
   engine runs). Edge was dropped (27 Oct): Microsoft's read-aloud now wants a Sec-MS-GEC v2 token (403 with v1).
+  `KokoroVoice` (build 30, Nexa only): serve.py `/phone/speak` on the Jetson, in the kiosk profile's Kokoro voice, 24 kHz
+  PCM16, one request per piece. It is a choice and never another voice's fallback. When chosen, the normal chain
+  follows it. The app never starts Kokoro (Zé keeps it off to save RAM): off = 503 "Kokoro is off on the Jetson".
 - Conversation: `TalkModel` keeps the shared serve.py history (`GET /history`, every 4 s while on screen, never
   during a turn, not with fewer messages than shown right after one). Typed messages are turns too: with voice
   on they cut in and get spoken, with voice off the reply is text only. `ReplyBlocks` (NexlineCore) is the RN
@@ -70,6 +73,12 @@ Plan, decisions and the feature cut-list are in the vault:
   `UtteranceEnd` end the turn via `Endpointer.speechEnded`) or `Listener` (iOS 26 SpeechAnalyzer, on-device).
   Deepgram failing at start or mid-session switches to `Listener`. Deepgram results carry their audio end time;
   one that ended before listening began is Nexa's echo and is dropped.
+- Whisper ears (build 30, Nexa only): `Listener` ends the turn and shows the live text, while `TurnRecorder` keeps the
+  same mic buffers (16 kHz Int16, last 40 s). After the standby check, the turn's audio (from 2.5 s before the first
+  result) goes to serve.py `/phone/transcribe` (the Jetson's whisper.cpp, base64 WAV in JSON, prompt = the Deepgram
+  keyterms), and Whisper's text is what gets sent. The iPhone's text is kept when Whisper is off, fails or hears no
+  words. Carapava/Mamadona, music listening and Dutch use Deepgram instead. Cut-in is the iPhone's instant cut. The
+  app never starts Whisper.
 - Enabling voice processing changes the IO formats while the engine is set up, so the engine starts with a
   configuration change pending and stops itself right away (spike builds 1-3). Fixed in build 4: resume the same
   engine (reinstall the tap, prepare, start; no session or voice-processing calls). Never answer a configuration

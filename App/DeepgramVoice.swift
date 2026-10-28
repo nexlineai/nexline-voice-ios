@@ -20,8 +20,16 @@ enum DeepgramVoice {
     /// A warm female voice, close to Nexa's `ara` on xAI.
     static let nexaVoice = "aura-2-thalia-en"
 
-    /// Expression tags like [laughs] are performed by xAI only; Deepgram would read them out.
+    /// Expression tags like [laughs] are performed by xAI only; Deepgram and Kokoro would read them out.
     private static let voiceTag = try! NSRegularExpression(pattern: "\\[/?[a-z]+(?:[ ,]+[a-z]+){0,3}\\]")
+
+    /// `text` without expression tags, for a voice that would read them out.
+    static func withoutVoiceTags(_ text: String) -> String {
+        voiceTag
+            .stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: " ")
+            .replacingOccurrences(of: "  ", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     /// Starts synthesizing at once; chunks are buffered until read.
     static func stream(_ text: String, voice: String = nexaVoice) -> AsyncThrowingStream<[Float], Error> {
@@ -30,10 +38,7 @@ enum DeepgramVoice {
                 continuation.finish(throwing: VoiceError.noKey)
                 return
             }
-            let spoken = voiceTag
-                .stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: " ")
-                .replacingOccurrences(of: "  ", with: " ")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let spoken = withoutVoiceTags(text)
             guard !spoken.isEmpty else {
                 continuation.finish()
                 return

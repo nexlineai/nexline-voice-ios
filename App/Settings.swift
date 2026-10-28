@@ -1,8 +1,9 @@
 import Foundation
 
 /// Who speaks Nexa's replies. The chosen one goes first; when it fails, the next ones in `fallbacks` take over.
+/// Kokoro runs on Nexa's Jetson: Nexa only, and a choice, never another voice's fallback (Zé, 28 Oct).
 enum VoiceChoice: String, CaseIterable, Identifiable {
-    case xai, deepgram, iphone
+    case xai, deepgram, iphone, kokoro
 
     static let storageKey = "voice"
     var id: String { rawValue }
@@ -12,6 +13,7 @@ enum VoiceChoice: String, CaseIterable, Identifiable {
         case .xai: return "xAI (Ara)"
         case .deepgram: return "Deepgram (Thalia)"
         case .iphone: return "iPhone voice"
+        case .kokoro: return "Kokoro (Nexa's Jetson)"
         }
     }
 
@@ -21,11 +23,12 @@ enum VoiceChoice: String, CaseIterable, Identifiable {
         case .xai: return "xAI"
         case .deepgram: return "Deepgram"
         case .iphone: return "iPhone"
+        case .kokoro: return "Kokoro"
         }
     }
 
     /// The chosen voice first, then the others in fallback order. The iPhone voice needs no network, so it is
-    /// last unless chosen.
+    /// last unless chosen. Kokoro is never in the list after another voice.
     var chain: [VoiceChoice] {
         [self] + [VoiceChoice.xai, .deepgram, .iphone].filter { $0 != self }
     }
@@ -35,9 +38,10 @@ enum VoiceChoice: String, CaseIterable, Identifiable {
     }
 }
 
-/// Who turns the user's speech into text. Deepgram falls back to the iPhone's recognizer.
+/// Who turns the user's speech into text. Deepgram falls back to the iPhone's recognizer. Whisper runs on
+/// Nexa's Jetson: the iPhone hears when a turn ends, Whisper writes its words (Nexa only, Zé 28 Oct).
 enum EarsChoice: String, CaseIterable, Identifiable {
-    case deepgram, iphone
+    case deepgram, iphone, whisper
 
     static let storageKey = "ears"
     var id: String { rawValue }
@@ -46,6 +50,7 @@ enum EarsChoice: String, CaseIterable, Identifiable {
         switch self {
         case .deepgram: return "Deepgram (Nova-3)"
         case .iphone: return "iPhone (on device)"
+        case .whisper: return "Whisper (Nexa's Jetson)"
         }
     }
 

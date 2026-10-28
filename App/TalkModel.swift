@@ -113,6 +113,10 @@ final class TalkModel: ObservableObject {
     private var launchedReply: String?
     /// Who is listening right now (Deepgram falls back to the iPhone mid-session).
     private var ears = EarsChoice.iphone
+    /// Whisper ears: the mic for the Jetson's Whisper, when the turn's first words came in, and the upload.
+    private let recorder = TurnRecorder()
+    private var turnHeardAt: Double?
+    private var transcribeTask: Task<Void, Never>?
     private var detector = BargeInDetector()
     /// A sound over her voice pauses her; the user's words cut her off, anything else lets her carry on.
     private var gate = CutInGate()
@@ -593,6 +597,8 @@ final class TalkModel: ObservableObject {
         cutReply(report: false)
         tickTask?.cancel()
         tickTask = nil
+        transcribeTask?.cancel()
+        transcribeTask = nil
         mic.target = nil
         deepgram.stop()
         await listener.stop()
@@ -608,6 +614,7 @@ final class TalkModel: ObservableObject {
     private func beginListening() {
         echoFilter = nil
         turnWordsFrom = nil
+        turnHeardAt = nil
         endpointer.reset()
         hearing = ""
         listeningSince = Self.now
@@ -616,8 +623,21 @@ final class TalkModel: ObservableObject {
 
     // MARK: Hearing the user
 
-    /// Starts Deepgram, or the iPhone's recognizer when Deepgram is not chosen or can't start.
+    /// Starts Deepgram, or the iPhone's recognizer when Deepgram is not chosen or can't start. Whisper is the
+    /// iPhone's recognizer for the end of the turn plus the Jetson's Whisper for its words.
     private func startEars(_ choice: EarsChoice) async throws {
+        var choice = choice
+        if choice == .whisper {
+            // Whisper runs on Nexa's Jetson. Music would reach it as words (build 29's music listening stays on
+            // Deepgram), and the iPhone's recognizer has no Dutch to end the turn with.
+            let reason: String? = bot != .nexa ? "Whisper is Nexa's"
+                : musicListening ? "music is playing"
+                : SpeechLanguage.current == .nl ? "the iPhone can't end a Dutch turn" : nil
+            if let reason {
+                note("listening: \(reason), Deepgram listens")
+                choice = .deepgram
+            }
+        }
         if choice == .deepgram {
             do {
                 // Deepgram says when speech ended; these gaps are only the backstop.
@@ -642,12 +662,22 @@ final class TalkModel: ObservableObject {
         }
         endpointer = Endpointer()
         let recognizer = self.listener
-        mic.target = { buffer in recognizer.feed(buffer) }
+        if choice == .whisper {
+            let recorder = self.recorder
+            recorder.clear()
+            mic.target = { buffer in
+                recognizer.feed(buffer)
+                recorder.feed(buffer)
+            }
+        } else {
+            mic.target = { buffer in recognizer.feed(buffer) }
+        }
         try await listener.start(
             localeID: Self.localeID,
             onResult: { [weak self] text, isFinal in self?.recognized(text, isFinal: isFinal, endsAt: nil) },
             onEvent: { [weak self] message in self?.note(message) })
-        ears = .iphone
+        ears = choice == .whisper ? .whisper : .iphone
+        if ears == .whisper { note("listening: the iPhone ends your turn, the Jetson's Whisper writes it") }
     }
 
     private func earsFailed(_ reason: String) async {
@@ -763,6 +793,7 @@ final class TalkModel: ObservableObject {
             if kept.count < words.count { text = kept.map(\.text).joined(separator: " ") }
         }
         if let last = kept.last { lastWordAt = last.end }
+        if turnHeardAt == nil && !text.trimmingCharacters(in: .whitespaces).isEmpty { turnHeardAt = Self.now }
         if let first = kept.first { turnWordsFrom = min(turnWordsFrom ?? first.start, first.start) }
         // Quiet counts from the newest word, so a repeated guess or an empty result doesn't hold the turn open.
         endpointer.add(text, isFinal: isFinal, at: kept.last?.end ?? Self.now)
@@ -796,6 +827,8 @@ final class TalkModel: ObservableObject {
             }
             guard let text = endpointer.take(at: now) else { return }
             hearing = ""
+            let heardAt = turnHeardAt
+            turnHeardAt = nil
             if ears == .deepgram, let lastWordAt {
                 note(String(format: "turn ended %.1f s after your last word (%@%@)", now - lastWordAt,
                             speechEndedBy ?? "no end event, silence backstop",
@@ -829,16 +862,62 @@ final class TalkModel: ObservableObject {
                 note("standby, not for \(bot.name): \"\(text)\"")
                 return
             }
+            // The recognizer's first result comes a moment after the first word: the audio starts earlier.
+            if ears == .whisper, let heardAt {
+                transcribe(text, from: max(heardAt - 2.5, listeningSince - 0.3))
+                return
+            }
             send(text)
         case .thinking, .speaking:
             // Also ends a turn whose voice failed, which would otherwise stay "thinking".
             // A speaker plays a little behind the queue (Bluetooth latency): listen once it has really finished.
             let tail = speakerMode ? AVAudioSession.sharedInstance().outputLatency + 0.3 : 0
-            if !gate.isPaused && !replyOpen && pending.isEmpty && speakTask == nil && now >= playbackEnd + tail {
+            if !gate.isPaused && !replyOpen && pending.isEmpty && speakTask == nil && transcribeTask == nil
+                && now >= playbackEnd + tail {
                 finishReply()
             }
         default:
             break
+        }
+    }
+
+    /// Whisper ears: the turn's audio goes to the Jetson's Whisper, and its words are what Nexa gets. The iPhone's
+    /// text, which ended the turn, is kept when Whisper is off, fails or hears no words.
+    private func transcribe(_ heard: String, from start: Double) {
+        guard let wav = recorder.wav(from: start) else {
+            send(heard)
+            return
+        }
+        phase = .thinking
+        hearing = heard
+        let gen = generation
+        let started = Self.now
+        let seconds = Double(wav.count - 44) / (2 * TurnRecorder.rate)
+        transcribeTask = Task { [weak self] in
+            guard let self else { return }
+            var text = heard
+            do {
+                let words = try await self.nexa.transcribe(
+                    wav: wav, language: SpeechLanguage.current.rawValue,
+                    prompt: DeepgramListener.keyterms.joined(separator: ", "))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let took = Self.now - started
+                // With no words whisper.cpp writes a bracketed label instead, like [BLANK_AUDIO].
+                if words.isEmpty || words.range(of: "^[\\[(].*[\\])]$", options: .regularExpression) != nil {
+                    self.note(String(format: "whisper: no words in %.1f s of audio (%.1f s), kept the iPhone's text",
+                                     seconds, took))
+                } else {
+                    self.note(String(format: "whisper: %.1f s of audio in %.1f s", seconds, took)
+                              + (words == heard ? "" : " (the iPhone heard \"\(heard)\")"))
+                    text = words
+                }
+            } catch {
+                self.note("whisper: \(error.localizedDescription), kept the iPhone's text")
+            }
+            self.transcribeTask = nil
+            guard gen == self.generation, self.phase == .thinking else { return }
+            self.hearing = ""
+            self.send(text)
         }
     }
 
@@ -1095,6 +1174,15 @@ final class TalkModel: ObservableObject {
             }
         } else {
             note("Deepgram: no key, the iPhone listens")
+        }
+
+        do {
+            let started = Self.now
+            _ = try await nexa.transcribe(wav: TurnRecorder.silence(seconds: 1),
+                                          language: SpeechLanguage.current.rawValue, prompt: "")
+            note(String(format: "Whisper (Jetson): OK, answered in %.1f s", Self.now - started))
+        } catch {
+            note("Whisper (Jetson): \(error.localizedDescription)")
         }
 
         do {

@@ -58,8 +58,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Your voice")
                 } footer: {
-                    Text("One language at a time; English knows the agents' names best. "
-                         + (ears == .deepgram ? "If Deepgram fails, the iPhone listens." : "On the iPhone, works offline."))
+                    Text("One language at a time; English knows the agents' names best. " + earsNote)
                 }
 
                 Section {
@@ -161,6 +160,16 @@ struct SettingsView: View {
         }
     }
 
+    private var earsNote: String {
+        switch ears {
+        case .deepgram: return "If Deepgram fails, the iPhone listens."
+        case .iphone: return "On the iPhone, works offline."
+        case .whisper:
+            return "Whisper on Nexa's Jetson, only while it runs there: the iPhone hears when you finish, Whisper writes "
+                + "the words (the iPhone's if Whisper is off). Carapava, Mamadona, music and Dutch use Deepgram."
+        }
+    }
+
     private var build: String {
         let info = Bundle.main.infoDictionary
         return "\(info?["CFBundleShortVersionString"] as? String ?? "?") (\(info?["CFBundleVersion"] as? String ?? "?"))"
@@ -239,11 +248,22 @@ private struct BotSettings: View {
 
             if open {
                 Picker("Speaks with", selection: $voice.engine) {
-                    ForEach(VoiceChoice.allCases) { Text($0.name).tag($0) }
+                    // Kokoro runs on Nexa's Jetson, so only Nexa has it.
+                    ForEach(VoiceChoice.allCases.filter { $0 != .kokoro || bot == .nexa }) { Text($0.name).tag($0) }
                 }
                 .pickerStyle(.segmented)
 
-                if voice.engine != .iphone {
+                if voice.engine == .kokoro {
+                    Button("Hear it") {
+                        Task { await talk.previewVoice(.kokoro, xai: voice.xai, deepgram: voice.deepgram) }
+                    }
+                    .font(.footnote.weight(.semibold))
+                    .disabled(talk.checking || talk.phase != .off)
+                    Text("Kokoro on the Jetson, in the kiosk's Kokoro voice. It only speaks while Kokoro is running "
+                         + "there; the app never starts it.")
+                        .font(.caption2).foregroundStyle(Theme.faint)
+                }
+                if voice.engine == .xai || voice.engine == .deepgram {
                     Text("Voice · tap to hear it").metaStyle(10, color: Theme.muted)
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 88), spacing: 8)], spacing: 8) {
                         ForEach(voice.engine == .xai ? BotVoice.xaiVoices : BotVoice.deepgramVoices, id: \.self) { id in
@@ -306,6 +326,7 @@ private struct BotSettings: View {
         case .xai: name = "xAI \(voice.xai.capitalized)"
         case .deepgram: name = "Deepgram \(BotVoice.deepgramLabel(voice.deepgram))"
         case .iphone: name = "iPhone voice"
+        case .kokoro: name = "Kokoro on the Jetson"
         }
         let trimmed = model.trimmingCharacters(in: .whitespaces)
         return "\(bot.tagline) · \(name)" + (trimmed.isEmpty ? "" : " · \(trimmed)")
@@ -325,7 +346,7 @@ struct LogView: View {
                 Button("Copy log") { talk.copyLog() }
                     .disabled(talk.log.isEmpty)
             } footer: {
-                Text("Checks Nexa's token and the Deepgram key, then each voice says one sentence. "
+                Text("Checks Nexa's token, the Deepgram key and the Jetson's Whisper, then each voice says one sentence. "
                      + "It doesn't talk to Nexa, so nothing shows up on the kiosk.")
             }
             Section("Log") {

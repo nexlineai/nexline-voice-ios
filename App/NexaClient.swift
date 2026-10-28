@@ -9,6 +9,8 @@ final class NexaClient: NSObject, URLSessionTaskDelegate {
         case rejected(Int)
         case notJSON(Int, String)
         case http(Int, String)
+        /// A Jetson service's own reason, like "Kokoro is off on the Jetson".
+        case service(String)
 
         var errorDescription: String? {
             switch self {
@@ -16,6 +18,7 @@ final class NexaClient: NSObject, URLSessionTaskDelegate {
             case .rejected(let code): return "Cloudflare Access rejected the token (HTTP \(code))"
             case .notJSON(let code, let body): return "HTTP \(code) but not the expected JSON: \(body)"
             case .http(let code, let body): return "HTTP \(code): \(body)"
+            case .service(let reason): return reason
             }
         }
     }
@@ -222,6 +225,44 @@ final class NexaClient: NSObject, URLSessionTaskDelegate {
         request.timeoutInterval = 15
         let (data, response) = try await session.data(for: request)
         try Self.check(response, body: String(decoding: data, as: UTF8.self))
+    }
+
+    /// Nexa's Kokoro voice on the Jetson: one piece as 16-bit PCM at 24 kHz (serve.py `/phone/speak`).
+    func speak(_ text: String) async throws -> Data {
+        var request = try jsonRequest("phone/speak", body: ["text": text, "client": "phone"])
+        request.timeoutInterval = 30
+        let (data, response) = try await session.data(for: request)
+        try Self.checkService(response, data)
+        guard (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "X-Sample-Rate") == "24000" else {
+            throw NexaError.service("Kokoro sent audio at another rate")
+        }
+        return data
+    }
+
+    /// The Jetson's Whisper on one finished turn (16 kHz mono WAV, serve.py `/phone/transcribe`). `prompt` is the
+    /// agents' names, the same list Deepgram gets.
+    func transcribe(wav: Data, language: String, prompt: String) async throws -> String {
+        var request = try jsonRequest("phone/transcribe", body: [
+            "audio": wav.base64EncodedString(), "language": language, "prompt": prompt, "client": "phone"])
+        request.timeoutInterval = 20
+        let (data, response) = try await session.data(for: request)
+        try Self.checkService(response, data)
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let text = object["text"] as? String else {
+            throw NexaError.notJSON(200, String(String(decoding: data, as: UTF8.self).prefix(80)))
+        }
+        return text
+    }
+
+    /// Like `check`, but serve.py's own reason ("Whisper is off on the Jetson") becomes the error.
+    private static func checkService(_ response: URLResponse, _ data: Data) throws {
+        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if (200..<300).contains(code) { return }
+        if (400..<600).contains(code), code != 401,
+           let reason = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String {
+            throw NexaError.service(reason)
+        }
+        try check(response, body: String(decoding: data, as: UTF8.self))
     }
 
     /// Tells serve.py what the user actually heard before cutting in, so history keeps only that.

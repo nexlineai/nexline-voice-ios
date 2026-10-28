@@ -2,7 +2,8 @@ import AVFoundation
 import Foundation
 import NexlineAudio
 
-/// Speaks with the chosen voice and falls back on its own: xAI → Deepgram → the iPhone's voice.
+/// Speaks with the chosen voice and falls back on its own: xAI → Deepgram → the iPhone's voice. Kokoro (Nexa's
+/// Jetson) is only ever first, when chosen.
 ///
 /// A voice that fails before its first audio (error, missing key, or no audio within its deadline) hands the
 /// same piece to the next one and is skipped for the rest of the session, so later sentences don't pay the
@@ -87,6 +88,8 @@ final class VoiceChain {
         case .xai: return 4
         case .deepgram: return 6
         case .iphone: return 10
+        // Kokoro makes the whole piece before it sends any of it, on the Jetson and through the tunnel.
+        case .kokoro: return 10
         }
     }
 
@@ -97,6 +100,7 @@ final class VoiceChain {
         case .xai: return XAIVoice.stream(text, voice: xai)
         case .deepgram: return DeepgramVoice.stream(text, voice: deepgram)
         case .iphone: return DeviceVoice.stream(text)
+        case .kokoro: return KokoroVoice.stream(text)
         }
     }
 }

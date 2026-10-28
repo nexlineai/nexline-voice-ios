@@ -125,7 +125,7 @@ final class Listener: @unchecked Sendable {
     }
 }
 
-/// A one-shot flag the converter's input block can set (the block may be `@Sendable`).
-private final class Flag: @unchecked Sendable {
+/// A one-shot flag the converter's input block can set (the block may be `@Sendable`). Also used by `TurnRecorder`.
+final class Flag: @unchecked Sendable {
     var value = false
 }
