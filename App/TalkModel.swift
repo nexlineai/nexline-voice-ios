@@ -88,7 +88,8 @@ final class TalkModel: ObservableObject {
 
     /// Setup A from the audio spike (build 4): passed with echo cancellation on.
     private static let setup = VoiceEngine.SessionSetup(
-        name: "default mode + A2DP", mode: .default, options: [.defaultToSpeaker, .allowBluetoothA2DP])
+        name: "default mode + A2DP + AirPlay", mode: .default,
+        options: [.defaultToSpeaker, .allowBluetoothA2DP, .allowAirPlay])
     private static var localeID: String { SpeechLanguage.current.locale }
 
     private let engine = VoiceEngine()
@@ -121,6 +122,10 @@ final class TalkModel: ObservableObject {
     private let logger = Logger(subsystem: "com.nexlineai.voice", category: "talk")
 
     private var bargeInOn = true
+    /// Playing on a music-only speaker (Bluetooth A2DP, AirPlay) without echo cancellation. Voice processing only
+    /// allows call routes, so iOS played her on the iPhone instead of the JBL (build 18); headphones and cars move
+    /// to their call profile instead and keep it. No cut-in by voice here, she'd hear herself: the orb tap stops her.
+    private var speakerMode = false
     private var windowUntil = 0.0
     private var resumeVoiceAfterMusic = false
 
@@ -157,6 +162,17 @@ final class TalkModel: ObservableObject {
     private var agentCutNote: String?
 
     private static var now: Double { ProcessInfo.processInfo.systemUptime }
+
+    /// The Bluetooth or AirPlay output the session plays to, if any.
+    private static var musicOutput: String? {
+        let music: [AVAudioSession.Port] = [.bluetoothA2DP, .airPlay, .bluetoothLE]
+        return AVAudioSession.sharedInstance().currentRoute.outputs.first { music.contains($0.portType) }?.portName
+    }
+
+    private static var onPhoneSpeaker: Bool {
+        let phone: [AVAudioSession.Port] = [.builtInSpeaker, .builtInReceiver]
+        return AVAudioSession.sharedInstance().currentRoute.outputs.contains { phone.contains($0.portType) }
+    }
     private var playing: Bool { Self.now < playbackEnd && !gate.isPaused }
 
     init() {
@@ -467,7 +483,20 @@ final class TalkModel: ObservableObject {
         note("voice: " + voice.chain.map(\.name).joined(separator: " → "))
         do {
             try engine.configureSession(Self.setup)
+            let speaker = Self.musicOutput
+            speakerMode = false
             try engine.start(voiceProcessing: true)
+            if let speaker {
+                // Voice processing moves the route; give it a moment, then see where she ended up.
+                try? await Task.sleep(for: .milliseconds(700))
+                guard phase == .starting else { return }
+                if Self.onPhoneSpeaker {
+                    try engine.configureSession(Self.setup)
+                    try engine.start(voiceProcessing: false)
+                    speakerMode = true
+                    note("\(speaker) only plays music: echo cancellation off so she plays there, tap the orb to stop her")
+                }
+            }
             try await startEars(EarsChoice.current)
         } catch {
             note("start failed: \(error.localizedDescription)")
@@ -493,6 +522,7 @@ final class TalkModel: ObservableObject {
         engine.stop()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         hearing = ""
+        speakerMode = false
         phase = .off
     }
 
@@ -568,7 +598,7 @@ final class TalkModel: ObservableObject {
             act(gate.level(loud: !muted && block.levelDB > detector.threshold(playing: false), at: now), at: now)
             return
         }
-        if speech && phase == .speaking && bargeInOn && !muted {
+        if speech && phase == .speaking && bargeInOn && !speakerMode && !muted {
             let into = settlingUntil.map { now - ($0 - Self.settleSeconds) } ?? 0
             note(String(format: "sound over her: mic %.0f dB over the %.0f dB line (floor %.0f), %@, %.1f s into her voice%@",
                         block.levelDB, meter.threshold, detector.noiseFloorDB,
@@ -653,7 +683,9 @@ final class TalkModel: ObservableObject {
             send(text)
         case .thinking, .speaking:
             // Also ends a turn whose voice failed, which would otherwise stay "thinking".
-            if !gate.isPaused && !replyOpen && pending.isEmpty && speakTask == nil && now >= playbackEnd {
+            // A speaker plays a little behind the queue (Bluetooth latency): listen once it has really finished.
+            let tail = speakerMode ? AVAudioSession.sharedInstance().outputLatency + 0.3 : 0
+            if !gate.isPaused && !replyOpen && pending.isEmpty && speakTask == nil && now >= playbackEnd + tail {
                 finishReply()
             }
         default:
@@ -979,8 +1011,16 @@ final class TalkModel: ObservableObject {
             let inputs = route.inputs.map(\.portName).joined(separator: ", ")
             let outputs = route.outputs.map(\.portName).joined(separator: ", ")
             Task { @MainActor in
-                self?.note("route: \(inputs) → \(outputs)")
-                self?.settlingUntil = nil
+                guard let self else { return }
+                self.note("route: \(inputs) → \(outputs)")
+                self.settlingUntil = nil
+                // The speaker went away: back to echo cancellation on whatever is left.
+                if self.speakerMode && self.phase != .off && Self.musicOutput == nil {
+                    self.speakerMode = false
+                    self.note("the speaker is gone, starting again with echo cancellation")
+                    await self.stop()
+                    await self.start()
+                }
             }
         })
     }

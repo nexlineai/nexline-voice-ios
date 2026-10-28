@@ -86,6 +86,12 @@ Plan, decisions and the feature cut-list are in the vault:
   timeline, levels, `playbackEnd` and settling all move by the pause, with 1 s strict after. The iPhone
   recognizer has no word times, so it still cuts at once. The log says "sound over her", then "carried on" or
   "cut off by your words".
+- Speaker mode (build 21): voice processing puts the session in voice-chat mode, which only allows call routes,
+  so a music-only speaker (the JBL Tuner, A2DP) was dropped for the iPhone speaker. `start()` notes the
+  Bluetooth/AirPlay output before voice processing. If the route lands on the iPhone speaker 0.7 s later, it
+  restarts without voice processing. Headphones and cars move to HFP and keep echo cancellation. In speaker mode
+  there's no cut-in by voice (she'd hear herself; the orb tap stops her), listening starts after her audio plus
+  `outputLatency` + 0.3 s, and losing the speaker restarts voice with echo cancellation.
 - Playback format is 24 kHz mono float; xAI streams 24 kHz 16-bit PCM, decoded to float.
 - Logs use subsystem `com.nexlineai.voice`; read them on Omarchy with `idevicesyslog` over USB. The app keeps the
   last 500 lines: Settings → Diagnostics → Copy log. A Deepgram turn logs how long after the last word it ended
